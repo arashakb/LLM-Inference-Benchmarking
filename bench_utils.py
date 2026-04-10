@@ -83,8 +83,9 @@ def benchmark(model, tokenizer, prompts, max_new_tokens, warmup_runs, device):
     all_latency = []
     all_tpot = []
     all_tokens = []
+    tpot_skipped = 0
 
-    for prompt in prompts:
+    for idx, prompt in enumerate(prompts):
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
         input_len = inputs["input_ids"].shape[1]
 
@@ -109,14 +110,22 @@ def benchmark(model, tokenizer, prompts, max_new_tokens, warmup_runs, device):
 
         ttft = (streamer.first_token_time - t_start) if streamer.first_token_time else latency
 
-        decode_tokens = max(new_tokens - 1, 1)
-        decode_time = latency - ttft
-        tpot = decode_time / decode_tokens
-
         all_ttft.append(ttft * 1000)
         all_latency.append(latency * 1000)
-        all_tpot.append(tpot * 1000)
         all_tokens.append(new_tokens)
+
+        if new_tokens < 2:
+            tpot_skipped += 1
+            print(
+                f"  ⚠ skipped TPOT for prompt index {idx} "
+                f"(only {new_tokens} token(s) generated)"
+            )
+            continue
+
+        decode_tokens = new_tokens - 1
+        decode_time = latency - ttft
+        tpot = decode_time / decode_tokens
+        all_tpot.append(tpot * 1000)
 
     total_tokens = sum(all_tokens)
     total_time = sum(all_latency) / 1000
@@ -127,8 +136,9 @@ def benchmark(model, tokenizer, prompts, max_new_tokens, warmup_runs, device):
         "ttft_std_ms": stdev(all_ttft) if len(all_ttft) > 1 else 0,
         "latency_mean_ms": mean(all_latency),
         "latency_std_ms": stdev(all_latency) if len(all_latency) > 1 else 0,
-        "tpot_mean_ms": mean(all_tpot),
+        "tpot_mean_ms": mean(all_tpot) if all_tpot else 0,
         "tpot_std_ms": stdev(all_tpot) if len(all_tpot) > 1 else 0,
+        "tpot_skipped": tpot_skipped,
         "peak_mem_mb": get_peak_memory_mb(device),
         "num_samples": len(prompts),
         "total_tokens": total_tokens,
@@ -145,6 +155,8 @@ def print_results(label, r):
     print(f"  Latency (TTFT+TPOT) : {r['latency_mean_ms']:>8.2f} ms  (std {r['latency_std_ms']:.2f})")
     print(f"  Peak memory         : {r['peak_mem_mb']:>8.1f} MB")
     print(f"  Samples / tokens    : {r['num_samples']} / {r['total_tokens']}")
+    if r.get("tpot_skipped", 0) > 0:
+        print(f"  TPOT skipped        : {r['tpot_skipped']} prompt(s) (<2 tokens generated)")
 
 
 def print_comparison(label_a, results_a, label_b, results_b):
