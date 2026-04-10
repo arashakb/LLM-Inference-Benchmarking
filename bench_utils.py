@@ -61,6 +61,25 @@ def free_memory():
         torch.cuda.empty_cache()
 
 
+def format_prompts(tokenizer, prompts):
+    """Apply the tokenizer's chat template if one is set, else return raw prompts.
+
+    Both benchmark scripts target instruct/chat-tuned models. Applying the
+    template makes prefill length match realistic serving and is required for
+    models like DeepSeek-R1-Distill that emit `<think>` reasoning blocks.
+    """
+    if not getattr(tokenizer, "chat_template", None):
+        return list(prompts)
+    return [
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": p}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        for p in prompts
+    ]
+
+
 def benchmark(model, tokenizer, prompts, max_new_tokens, warmup_runs, device):
     gen_config = GenerationConfig(
         max_new_tokens=max_new_tokens,

@@ -6,7 +6,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.quantization import GGUFConfig
-from bench_utils import PROMPTS, benchmark, print_results, print_comparison, free_memory
+from bench_utils import (
+    PROMPTS,
+    benchmark,
+    format_prompts,
+    free_memory,
+    print_comparison,
+    print_results,
+)
 
 # ── Configuration ──────────────────────────────────────────────
 model_id = "Qwen/Qwen2.5-7B-Instruct"
@@ -24,6 +31,7 @@ def main():
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     prompts = PROMPTS[:num_samples]
+    fp16_prompts = format_prompts(tokenizer, prompts)
 
     # ── 1. Benchmark FP16 ──
     print("\n>>> Loading original FP16 model...")
@@ -34,7 +42,7 @@ def main():
     print(f"    Loaded in {time.perf_counter() - t0:.1f}s")
 
     print(">>> Benchmarking FP16 model...")
-    fp16_results = benchmark(orig_model, tokenizer, prompts, max_new_tokens, warmup_runs, device)
+    fp16_results = benchmark(orig_model, tokenizer, fp16_prompts, max_new_tokens, warmup_runs, device)
     print_results("FP16 (Original)", fp16_results)
 
     del orig_model
@@ -64,8 +72,9 @@ def main():
     quant_model = GPTQModel.load(quant_path, backend=BACKEND.GGUF_TRITON, device=device)
     print(f"    Loaded in {time.perf_counter() - t0:.1f}s")
 
+    quant_prompts = format_prompts(tokenizer, prompts)
     print(f">>> Benchmarking GGUF {gguf_format} model...")
-    quant_results = benchmark(quant_model, tokenizer, prompts, max_new_tokens, warmup_runs, device)
+    quant_results = benchmark(quant_model, tokenizer, quant_prompts, max_new_tokens, warmup_runs, device)
     print_results(f"GGUF {gguf_format} (Quantized)", quant_results)
 
     del quant_model
