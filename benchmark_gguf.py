@@ -72,9 +72,15 @@ def main():
     quant_model = GPTQModel.load(quant_path, backend=BACKEND.GGUF_TRITON, device=device)
     print(f"    Loaded in {time.perf_counter() - t0:.1f}s")
 
-    quant_prompts = format_prompts(tokenizer, prompts)
+    # Load the tokenizer from the quantized path so any drift in special
+    # tokens, vocab, or chat template stays consistent with the quant model.
+    quant_tokenizer = AutoTokenizer.from_pretrained(quant_path)
+    if not quant_tokenizer.pad_token_id:
+        quant_tokenizer.pad_token_id = quant_tokenizer.eos_token_id
+
+    quant_prompts = format_prompts(quant_tokenizer, prompts)
     print(f">>> Benchmarking GGUF {gguf_format} model...")
-    quant_results = benchmark(quant_model, tokenizer, quant_prompts, max_new_tokens, warmup_runs, device)
+    quant_results = benchmark(quant_model, quant_tokenizer, quant_prompts, max_new_tokens, warmup_runs, device)
     print_results(f"GGUF {gguf_format} (Quantized)", quant_results)
 
     del quant_model

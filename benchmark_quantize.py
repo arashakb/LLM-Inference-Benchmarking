@@ -51,9 +51,19 @@ def main():
     quant_model = GPTQModel.load(quant_id, device=device)
     print(f"    Loaded in {time.perf_counter() - t0:.1f}s")
 
-    quant_prompts = format_prompts(tokenizer, prompts)
+    # Prefer the tokenizer shipped with the quantized repo so any drift in
+    # special tokens or chat template stays consistent with the quant model.
+    try:
+        quant_tokenizer = AutoTokenizer.from_pretrained(quant_id)
+        if not quant_tokenizer.pad_token_id:
+            quant_tokenizer.pad_token_id = quant_tokenizer.eos_token_id
+    except Exception as e:
+        print(f"  ⚠ could not load tokenizer from {quant_id} ({e}); falling back to base tokenizer")
+        quant_tokenizer = tokenizer
+
+    quant_prompts = format_prompts(quant_tokenizer, prompts)
     print(">>> Benchmarking GPTQ 4-bit model...")
-    quant_results = benchmark(quant_model, tokenizer, quant_prompts, max_new_tokens, warmup_runs, device)
+    quant_results = benchmark(quant_model, quant_tokenizer, quant_prompts, max_new_tokens, warmup_runs, device)
     print_results("GPTQ 4-bit (Quantized)", quant_results)
 
     del quant_model
