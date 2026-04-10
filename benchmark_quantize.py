@@ -34,9 +34,12 @@ def main():
     # ── 1. Benchmark FP16 ──
     print("\n>>> Loading original FP16 model...")
     t0 = time.perf_counter()
-    orig_model = AutoModelForCausalLM.from_pretrained(
-        model_id, torch_dtype=torch.float16, device_map=device,
-    )
+    # On MPS, the default SDPA attention path crashes inside generate()
+    # ("mps_matmul: invalid shape"), so force the eager implementation.
+    fp16_kwargs = {"torch_dtype": torch.float16, "device_map": device}
+    if device == "mps":
+        fp16_kwargs["attn_implementation"] = "eager"
+    orig_model = AutoModelForCausalLM.from_pretrained(model_id, **fp16_kwargs)
     print(f"    Loaded in {time.perf_counter() - t0:.1f}s")
 
     print(">>> Benchmarking FP16 model...")
