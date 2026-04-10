@@ -95,8 +95,4 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        log.exception("benchmark_quantize.py aborted with an exception")
-        raise
+    main()

@@ -101,6 +101,13 @@ def main():
     log.info("loading quantized GGUF model...")
     t0 = time.perf_counter()
     quant_model = GPTQModel.load(quant_path, backend=gguf_backend, device=device)
+    # GPTQModel.load places the packed quant weights on `device`, but on MPS
+    # the unquantized layers (embeddings, layernorms, lm_head) can be left on
+    # CPU, causing "Placeholder storage has not been allocated on MPS device"
+    # at the first embed_tokens() call. Force the whole HF submodule onto
+    # the target device to make sure inputs and weights co-locate.
+    if device != "cpu" and hasattr(quant_model, "model"):
+        quant_model.model.to(device)
     log.info("loaded in %.1fs", time.perf_counter() - t0)
 
     # Load the tokenizer from the quantized path so any drift in special
@@ -124,8 +131,4 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        log.exception("benchmark_gguf.py aborted with an exception")
-        raise
+    main()
