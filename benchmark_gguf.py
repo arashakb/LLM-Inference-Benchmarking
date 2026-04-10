@@ -73,6 +73,12 @@ def main():
     del orig_model
     free_memory()
 
+    # The default GGUF kernel is GGUF_TRITON, which requires `triton` and is
+    # CUDA-only. On MPS/CPU fall back to the pure-PyTorch GGUF_TORCH kernel
+    # (DEVICE.ALL, PLATFORM.ALL per gptqmodel's qlinear registry).
+    gguf_backend = BACKEND.GGUF_TRITON if device.startswith("cuda") else BACKEND.GGUF_TORCH
+    log.info("gguf backend: %s", gguf_backend)
+
     # ── 2. Quantize (GGUF Q4_K_M) — skip if already saved ──
     if os.path.isdir(quant_path):
         log.info("quantized model found at %s, skipping quantization.", quant_path)
@@ -83,7 +89,7 @@ def main():
         quant_model = GPTQModel.load(model_id, qconfig)
 
         t0 = time.perf_counter()
-        quant_model.quantize(calibration=None, tokenizer=tokenizer)
+        quant_model.quantize(calibration=None, tokenizer=tokenizer, backend=gguf_backend)
         log.info("quantization took %.1fs", time.perf_counter() - t0)
 
         quant_model.save(quant_path)
@@ -94,7 +100,7 @@ def main():
     # ── 3. Benchmark quantized ──
     log.info("loading quantized GGUF model...")
     t0 = time.perf_counter()
-    quant_model = GPTQModel.load(quant_path, backend=BACKEND.GGUF_TRITON, device=device)
+    quant_model = GPTQModel.load(quant_path, backend=gguf_backend, device=device)
     log.info("loaded in %.1fs", time.perf_counter() - t0)
 
     # Load the tokenizer from the quantized path so any drift in special
