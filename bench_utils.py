@@ -44,21 +44,53 @@ class TTFTStreamer(BaseStreamer):
         pass
 
 
-def get_peak_memory_mb(device="cuda:0"):
+def pick_device():
+    """Return the best available accelerator string: cuda → mps → cpu."""
     if torch.cuda.is_available():
+        return "cuda:0"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def _is_cuda(device):
+    return str(device).startswith("cuda")
+
+
+def _is_mps(device):
+    return str(device).startswith("mps")
+
+
+def sync_device(device):
+    """Block until queued GPU work for the given device is finished."""
+    if _is_cuda(device) and torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif _is_mps(device) and torch.backends.mps.is_available():
+        torch.mps.synchronize()
+
+
+def get_peak_memory_mb(device="cuda:0"):
+    if _is_cuda(device) and torch.cuda.is_available():
         return torch.cuda.max_memory_allocated(device) / 1024 / 1024
+    if _is_mps(device) and torch.backends.mps.is_available():
+        # MPS has no peak-tracking API; report current driver allocation as a
+        # best-effort proxy. Will under-report if the peak occurred earlier.
+        return torch.mps.driver_allocated_memory() / 1024 / 1024
     return 0.0
 
 
 def reset_peak_memory(device="cuda:0"):
-    if torch.cuda.is_available():
+    if _is_cuda(device) and torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats(device)
+    # MPS has no equivalent reset; silently no-op.
 
 
 def free_memory():
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    elif torch.backends.mps.is_available():
+        torch.mps.empty_cache()
 
 
 def format_prompts(tokenizer, prompts):
@@ -92,8 +124,7 @@ def benchmark(model, tokenizer, prompts, max_new_tokens, warmup_runs, device):
         inputs = tokenizer(prompts[i], return_tensors="pt").to(device)
         with torch.no_grad():
             model.generate(**inputs, generation_config=gen_config)
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    sync_device(device)
 
     # Measure
     reset_peak_memory(device)
@@ -109,8 +140,7 @@ def benchmark(model, tokenizer, prompts, max_new_tokens, warmup_runs, device):
         input_len = inputs["input_ids"].shape[1]
 
         streamer = TTFTStreamer()
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        sync_device(device)
 
         streamer.start_time = time.perf_counter()
         t_start = streamer.start_time
@@ -120,8 +150,7 @@ def benchmark(model, tokenizer, prompts, max_new_tokens, warmup_runs, device):
                 **inputs, generation_config=gen_config, streamer=streamer,
             )
 
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        sync_device(device)
         t_end = time.perf_counter()
 
         new_tokens = output_ids.shape[1] - input_len

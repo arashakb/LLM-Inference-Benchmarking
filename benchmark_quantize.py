@@ -9,6 +9,7 @@ from bench_utils import (
     benchmark,
     format_prompts,
     free_memory,
+    pick_device,
     print_comparison,
     print_results,
 )
@@ -19,7 +20,7 @@ quant_id = "ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2"
 num_samples = 10
 max_new_tokens = 128
 warmup_runs = 2
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
+device = pick_device()
 
 
 def main():
