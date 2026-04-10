@@ -22,8 +22,10 @@ from bench_utils import (
 log = logging.getLogger("bench")
 
 # ── Configuration ──────────────────────────────────────────────
-model_id = "Qwen/Qwen2.5-7B-Instruct"
-quant_path = "Qwen2.5-7B-Instruct-GGUF-Q4_K_M"
+# Tiny model for local end-to-end smoke runs (already cached on dev Mac).
+# For the real 7B comparison, swap back to "Qwen/Qwen2.5-7B-Instruct".
+model_id = "Qwen/Qwen2.5-0.5B-Instruct"
+quant_path = "Qwen2.5-0.5B-Instruct-GGUF-Q4_K_M"
 gguf_format = "q4_k_m"
 num_samples = 10
 max_new_tokens = 128
@@ -116,4 +118,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        log.exception("benchmark_gguf.py aborted with an exception")
+        raise

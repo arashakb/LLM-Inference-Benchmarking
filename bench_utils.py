@@ -2,6 +2,7 @@ import gc
 import json
 import logging
 import os
+import sys
 import time
 from datetime import datetime
 from statistics import mean, stdev
@@ -44,6 +45,17 @@ def setup_run_logging(script_name):
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)
     root.addHandler(stream_handler)
+
+    # Route any uncaught exception through the logger so tracebacks land in
+    # run.log instead of only reaching the terminal (where they may be lost if
+    # the script was launched with output redirected).
+    def _excepthook(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        log.error("uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
+
+    sys.excepthook = _excepthook
 
     log.info("run dir: %s", run_dir)
     return run_dir
