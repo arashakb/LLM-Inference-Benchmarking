@@ -10,9 +10,11 @@ from gptqmodel.quantization import GGUFConfig
 from bench_utils import (
     PROMPTS,
     benchmark,
+    compute_perplexity,
     dump_results,
     format_prompts,
     free_memory,
+    load_wikitext2_tokens,
     pick_device,
     print_comparison,
     print_results,
@@ -67,6 +69,12 @@ def main():
 
     log.info("benchmarking FP16 model...")
     fp16_results = benchmark(orig_model, tokenizer, fp16_prompts, max_new_tokens, warmup_runs, device)
+
+    log.info("computing perplexity (FP16)...")
+    wikitext_tokens = load_wikitext2_tokens(tokenizer)
+    fp16_results["perplexity"] = compute_perplexity(orig_model, wikitext_tokens, device)
+    log.info("FP16 perplexity: %.2f", fp16_results["perplexity"])
+
     print_results("FP16 (Original)", fp16_results)
     dump_results(run_dir, "FP16 (Original)", fp16_results)
 
@@ -119,6 +127,12 @@ def main():
     quant_prompts = format_prompts(quant_tokenizer, prompts)
     log.info("benchmarking GGUF %s model...", gguf_format)
     quant_results = benchmark(quant_model, quant_tokenizer, quant_prompts, max_new_tokens, warmup_runs, device)
+
+    log.info("computing perplexity (GGUF %s)...", gguf_format)
+    quant_wikitext_tokens = load_wikitext2_tokens(quant_tokenizer)
+    quant_results["perplexity"] = compute_perplexity(quant_model, quant_wikitext_tokens, device)
+    log.info("GGUF perplexity: %.2f", quant_results["perplexity"])
+
     label = f"GGUF {gguf_format} (Quantized)"
     print_results(label, quant_results)
     dump_results(run_dir, label, quant_results)

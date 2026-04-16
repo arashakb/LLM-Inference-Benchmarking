@@ -4,9 +4,11 @@ import time
 from bench_utils import (
     PROMPTS,
     benchmark_mlx_model,
+    compute_perplexity_mlx,
     dump_results,
     format_prompts,
     free_memory,
+    load_wikitext2_tokens,
     print_comparison,
     print_results,
     setup_run_logging,
@@ -51,6 +53,12 @@ def main():
     fp16_results = benchmark_mlx_model(
         fp16_model, fp16_tokenizer, fp16_prompts, max_new_tokens, warmup_runs
     )
+
+    log.info("computing perplexity (FP16 MLX)...")
+    wikitext_tokens = load_wikitext2_tokens(fp16_tokenizer)
+    fp16_results["perplexity"] = compute_perplexity_mlx(fp16_model, wikitext_tokens)
+    log.info("FP16 MLX perplexity: %.2f", fp16_results["perplexity"])
+
     print_results("FP16 (MLX)", fp16_results)
     dump_results(run_dir, "FP16 (MLX)", fp16_results)
 
@@ -69,6 +77,12 @@ def main():
     quant_results = benchmark_mlx_model(
         quant_model, quant_tokenizer, quant_prompts, max_new_tokens, warmup_runs
     )
+
+    log.info("computing perplexity (MLX 4-bit)...")
+    quant_wikitext_tokens = load_wikitext2_tokens(quant_tokenizer)
+    quant_results["perplexity"] = compute_perplexity_mlx(quant_model, quant_wikitext_tokens)
+    log.info("MLX 4-bit perplexity: %.2f", quant_results["perplexity"])
+
     label = "MLX 4-bit (Quantized)"
     print_results(label, quant_results)
     dump_results(run_dir, label, quant_results)

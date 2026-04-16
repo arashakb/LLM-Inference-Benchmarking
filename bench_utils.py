@@ -1,6 +1,7 @@
 import gc
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -181,6 +182,123 @@ def format_prompts(tokenizer, prompts):
     ]
 
 
+def load_wikitext2_tokens(tokenizer):
+    """Load WikiText-2 test split, concatenate, and tokenize.
+
+    Returns a plain Python list[int] so the caller can convert to the
+    framework-specific tensor type (torch.tensor or mx.array).
+
+    Uses huggingface_hub (already a transitive dependency of transformers)
+    to download the raw text, avoiding the heavy `datasets` library which
+    requires lzma support that some pyenv Python builds lack.
+    """
+    from huggingface_hub import hf_hub_download
+
+    path = hf_hub_download(
+        repo_id="Salesforce/wikitext",
+        repo_type="dataset",
+        filename="wikitext-2-raw-v1/test-00000-of-00001.parquet",
+    )
+
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path)
+    rows = table.column("text").to_pylist()
+    text = "\n\n".join(line for line in rows if line.strip())
+
+    # Handle both HuggingFace tokenizers (callable) and mlx_lm
+    # TokenizerWrapper (delegates to ._tokenizer).
+    inner = getattr(tokenizer, "_tokenizer", tokenizer)
+    return inner.encode(text)
+
+
+def compute_perplexity(model, token_ids, device, max_length=2048, stride=512):
+    """Sliding-window perplexity over pre-tokenized text (PyTorch models).
+
+    Works with both AutoModelForCausalLM and GPTQModel — both support
+    forward(input_ids, labels=...) returning an output with .loss.
+    """
+    input_ids = torch.tensor(token_ids, dtype=torch.long).unsqueeze(0)
+    seq_len = input_ids.size(1)
+
+    nlls = []
+
+    for begin in range(0, seq_len, stride):
+        end = min(begin + max_length, seq_len)
+        chunk = input_ids[:, begin:end].to(device)
+        target = chunk.clone()
+
+        # Mask the overlap region so tokens aren't double-counted.
+        # Keep only the last `stride` tokens (or fewer for the final chunk).
+        if begin > 0:
+            num_keep = min(stride, end - begin)
+            target[:, : end - begin - num_keep] = -100
+
+        with torch.no_grad():
+            outputs = model(chunk, labels=target)
+            nll = outputs.loss.float().item()
+
+        num_scored = (target != -100).sum().item()
+        nlls.append((nll, num_scored))
+
+        if end == seq_len:
+            break
+
+    total_nll = sum(nll * n for nll, n in nlls)
+    total_tokens = sum(n for _, n in nlls)
+    avg_nll = total_nll / total_tokens
+    return math.exp(avg_nll)
+
+
+def compute_perplexity_mlx(model, token_ids, max_length=2048, stride=512):
+    """Sliding-window perplexity for MLX models (Apple Silicon).
+
+    MLX models don't support a labels= shortcut, so we compute
+    cross-entropy manually from logits.
+    """
+    import mlx.core as mx
+    import mlx.nn as nn
+
+    input_ids = mx.array(token_ids)
+    seq_len = len(input_ids)
+
+    nlls = []
+
+    for begin in range(0, seq_len, stride):
+        end = min(begin + max_length, seq_len)
+        chunk = input_ids[begin:end]
+
+        logits = model(chunk[None])  # (1, chunk_len, vocab_size)
+
+        # Shift: logits[:, :-1] predict tokens at positions 1..end
+        shift_logits = logits[:, :-1, :]
+        shift_labels = chunk[1:]
+
+        # Only score the stride portion (skip overlap context)
+        if begin > 0:
+            score_start = max_length - stride - 1
+        else:
+            score_start = 0
+
+        score_logits = shift_logits[:, score_start:, :]
+        score_labels = shift_labels[score_start:]
+
+        score_logits_2d = score_logits.reshape(-1, score_logits.shape[-1])
+        loss = nn.losses.cross_entropy(score_logits_2d, score_labels, reduction="sum")
+        mx.eval(loss)
+
+        num_scored = score_labels.size
+        nlls.append((loss.item(), num_scored))
+
+        if end == seq_len:
+            break
+
+    total_nll = sum(nll for nll, _ in nlls)
+    total_tokens = sum(n for _, n in nlls)
+    avg_nll = total_nll / total_tokens
+    return math.exp(avg_nll)
+
+
 def benchmark(model, tokenizer, prompts, max_new_tokens, warmup_runs, device):
     gen_config = GenerationConfig(
         max_new_tokens=max_new_tokens,
@@ -275,6 +393,8 @@ def print_results(label, r):
         f"  Peak memory         : {r['peak_mem_mb']:>8.1f} MB",
         f"  Samples / tokens    : {r['num_samples']} / {r['total_tokens']}",
     ]
+    if "perplexity" in r:
+        lines.append(f"  Perplexity          : {r['perplexity']:>8.2f}")
     if r.get("tpot_skipped", 0) > 0:
         lines.append(f"  TPOT skipped        : {r['tpot_skipped']} prompt(s) (<2 tokens generated)")
     log.info("\n".join(lines))
@@ -302,6 +422,12 @@ def print_comparison(label_a, results_a, label_b, results_b):
         f"  {'TPOT (ms)':<22} {results_a['tpot_mean_ms']:>12.2f} {results_b['tpot_mean_ms']:>12.2f} {delta(results_b['tpot_mean_ms'], results_a['tpot_mean_ms']):>10}",
         f"  {'Latency (ms)':<22} {results_a['latency_mean_ms']:>12.2f} {results_b['latency_mean_ms']:>12.2f} {delta(results_b['latency_mean_ms'], results_a['latency_mean_ms']):>10}",
         f"  {'Peak memory (MB)':<22} {results_a['peak_mem_mb']:>12.1f} {results_b['peak_mem_mb']:>12.1f} {delta(results_b['peak_mem_mb'], results_a['peak_mem_mb']):>10}",
+    ]
+    if "perplexity" in results_a and "perplexity" in results_b:
+        lines.append(
+            f"  {'Perplexity':<22} {results_a['perplexity']:>12.2f} {results_b['perplexity']:>12.2f} {delta(results_b['perplexity'], results_a['perplexity']):>10}"
+        )
+    lines += [
         f"  {'-' * 56}",
         f"  Speedup: {speedup:.2f}x  |  Memory saved: {mem_saved:.1f}%",
         "=" * 60,
