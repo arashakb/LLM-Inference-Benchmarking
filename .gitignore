@@ -20,3 +20,6 @@ outputs/
 __pycache__/
 *.pyc
 *.pyo
+
+# Claude Code
+.claude/
