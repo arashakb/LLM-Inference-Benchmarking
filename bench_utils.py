@@ -482,12 +482,14 @@ def evaluate_gsm8k(model, tokenizer, questions, max_new_tokens, warmup_runs, dev
     all_latency = []
     all_tpot = []
     all_tokens = []
+    all_prompt_lens = []
     tpot_skipped = 0
     correct = 0
 
     for idx, (prompt, item) in enumerate(zip(prompts, questions)):
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
         input_len = inputs["input_ids"].shape[1]
+        all_prompt_lens.append(input_len)
 
         streamer = TTFTStreamer()
         sync_device(device)
@@ -547,6 +549,8 @@ def evaluate_gsm8k(model, tokenizer, questions, max_new_tokens, warmup_runs, dev
         "peak_mem_mb": get_peak_memory_mb(device),
         "num_samples": len(questions),
         "total_tokens": total_tokens,
+        "prompt_len_mean": mean(all_prompt_lens),
+        "output_len_mean": mean(all_tokens),
         "gsm8k_accuracy": correct / len(questions),
         "gsm8k_correct": correct,
         "gsm8k_total": len(questions),
@@ -564,8 +568,15 @@ def print_results(label, r):
         f"  TPOT (decode)       : {r['tpot_mean_ms']:>8.2f} ms  (std {r['tpot_std_ms']:.2f})",
         f"  Latency (TTFT+TPOT) : {r['latency_mean_ms']:>8.2f} ms  (std {r['latency_std_ms']:.2f})",
         f"  Peak memory         : {r['peak_mem_mb']:>8.1f} MB",
-        f"  Samples / tokens    : {r['num_samples']} / {r['total_tokens']}",
     ]
+    if "weight_mem_mb" in r:
+        lines.append(f"  Weight memory       : {r['weight_mem_mb']:>8.1f} MB")
+        lines.append(f"  Runtime memory      : {r['runtime_mem_mb']:>8.1f} MB")
+    lines.append(f"  Samples / tokens    : {r['num_samples']} / {r['total_tokens']}")
+    if "prompt_len_mean" in r:
+        lines.append(
+            f"  Prompt / output len : {r['prompt_len_mean']:>5.0f} / {r['output_len_mean']:>5.0f} tokens (mean)"
+        )
     if "perplexity" in r:
         lines.append(f"  Perplexity          : {r['perplexity']:>8.2f}")
     if "gsm8k_accuracy" in r:
@@ -739,10 +750,15 @@ def evaluate_gsm8k_mlx(model, tokenizer, questions, max_new_tokens, warmup_runs)
     all_latency = []
     all_tpot = []
     all_tokens = []
+    all_prompt_lens = []
     tpot_skipped = 0
     correct = 0
 
     for idx, (prompt, item) in enumerate(zip(prompts, questions)):
+        # Estimate prompt length by tokenizing (mlx tokenizers support encode)
+        prompt_tokens = tokenizer.encode(prompt)
+        all_prompt_lens.append(len(prompt_tokens))
+
         t_start = time.perf_counter()
         first_token = None
         yield_count = 0
@@ -802,6 +818,8 @@ def evaluate_gsm8k_mlx(model, tokenizer, questions, max_new_tokens, warmup_runs)
         "peak_mem_mb": mx.get_peak_memory() / 1024 / 1024,
         "num_samples": len(questions),
         "total_tokens": total_tokens,
+        "prompt_len_mean": mean(all_prompt_lens),
+        "output_len_mean": mean(all_tokens),
         "gsm8k_accuracy": correct / len(questions),
         "gsm8k_correct": correct,
         "gsm8k_total": len(questions),
