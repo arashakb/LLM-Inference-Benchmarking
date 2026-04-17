@@ -4,20 +4,11 @@
 
 set -eo pipefail
 
-TOP_N=20
-if [[ "${1:-}" == "--top" ]]; then TOP_N="${2:-20}"; elif [[ -n "${1:-}" ]]; then TOP_N="$1"; fi
-
-# Colors
-BOLD='\033[1m'
-DIM='\033[2m'
-CYAN='\033[36m'
-YELLOW='\033[33m'
-GREEN='\033[32m'
-RED='\033[31m'
-RESET='\033[0m'
+TOP_N=5
+if [[ "${1:-}" == "--top" ]]; then TOP_N="${2:-5}"; elif [[ -n "${1:-}" ]]; then TOP_N="$1"; fi
 
 # --- System Summary ---
-echo -e "${BOLD}${CYAN}=== Memory Overview ===${RESET}"
+echo "=== Memory Overview ==="
 echo ""
 
 # Total RAM
@@ -36,18 +27,7 @@ compressor=$(echo "$phys" | sed -E 's/.*[, ]([0-9]+[MG]) compressor.*/\1/')
 unused=$(echo "$phys" | sed -E 's/.*\) *, *([0-9]+[MG]) unused.*/\1/')
 
 # Swap
-swap_in=$(sysctl -n vm.swapusage 2>/dev/null | awk '{print $3}' || echo "n/a")
 swap_used=$(sysctl -n vm.swapusage 2>/dev/null | awk '{print $6}' || echo "n/a")
-
-# Color based on free %
-pct_num=${free_pct/\%/}
-if (( pct_num >= 50 )); then
-    pct_color=$GREEN
-elif (( pct_num >= 25 )); then
-    pct_color=$YELLOW
-else
-    pct_color=$RED
-fi
 
 printf "  Total RAM:    %s GB\n" "$total_gb"
 printf "  Used:         %s\n" "$used"
@@ -55,28 +35,56 @@ printf "  Free:         %s\n" "$unused"
 printf "  Wired:        %s\n" "$wired"
 printf "  Compressor:   %s\n" "$compressor"
 printf "  Swap used:    %s\n" "$swap_used"
-echo -e "  Free %%:       ${pct_color}${free_pct}${RESET}"
+printf "  Free %%:       %s\n" "$free_pct"
 echo ""
 
 # --- Load ---
 load=$(sysctl -n vm.loadavg | tr -d '{}' | awk '{$1=$1; print}')
 procs=$(ps -e | wc -l | tr -d ' ')
-echo -e "${BOLD}${CYAN}=== System Load ===${RESET}"
+echo "=== System Load ==="
 printf "  Load avg:     %s\n" "$load"
 printf "  Processes:    %s\n" "$procs"
 echo ""
 
-# --- Top Processes by RSS ---
-echo -e "${BOLD}${CYAN}=== Top ${TOP_N} Processes by Memory ===${RESET}"
+# --- GPU ---
+echo "=== GPU (Apple Silicon) ==="
 echo ""
-printf "  ${DIM}%-8s %10s  %s${RESET}\n" "PID" "RSS" "COMMAND"
-printf "  ${DIM}%-8s %10s  %s${RESET}\n" "---" "---" "-------"
+
+perf=$(ioreg -r -c IOAccelerator | grep '"PerformanceStatistics"' | head -1)
+if [[ -n "$perf" ]]; then
+    alloc=$(echo "$perf"  | grep -oE '"Alloc system memory"=[0-9]+'   | grep -oE '[0-9]+$')
+    device=$(echo "$perf" | grep -oE '"Device Utilization %"=[0-9]+'  | grep -oE '[0-9]+$')
+    render=$(echo "$perf" | grep -oE '"Renderer Utilization %"=[0-9]+' | grep -oE '[0-9]+$')
+    tiler=$(echo "$perf"  | grep -oE '"Tiler Utilization %"=[0-9]+'   | grep -oE '[0-9]+$')
+    [[ -n "$alloc"  ]] && printf "  Metal alloc:  %.0f MB\n" "$(echo "scale=2; $alloc/1048576" | bc)"
+    [[ -n "$device" ]] && printf "  GPU active:   %s%%\n" "$device"
+    [[ -n "$render" ]] && printf "  Renderer:     %s%%\n" "$render"
+    [[ -n "$tiler"  ]] && printf "  Tiler:        %s%%\n" "$tiler"
+else
+    printf "  Metal stats:  unavailable\n"
+fi
+
+if [[ $EUID -eq 0 ]]; then
+    pm=$(powermetrics --samplers gpu_power -n1 -i500 2>/dev/null)
+    freq=$(echo "$pm"  | grep -i "GPU frequency" | grep -oE '[0-9]+ MHz' | head -1)
+    power=$(echo "$pm" | grep -i "GPU Power"     | grep -oE '[0-9.]+ mW'  | head -1)
+    [[ -n "$freq"  ]] && printf "  GPU freq:     %s\n" "$freq"
+    [[ -n "$power" ]] && printf "  GPU power:    %s\n" "$power"
+else
+    printf "  Freq/power: run as sudo for GPU wattage\n"
+fi
+echo ""
+
+# --- Top Processes by RSS ---
+echo "=== Top ${TOP_N} Processes by Memory ==="
+echo ""
+printf "  %-8s %10s  %s\n" "PID" "RSS" "COMMAND"
+printf "  %-8s %10s  %s\n" "---" "---" "-------"
 
 ps -eo pid,rss,comm -r | awk -v n="$TOP_N" '
 NR > 1 && NR <= n+1 && $2 > 0 {
     mb = $2 / 1024
     cmd = $3
-    # shorten common paths
     gsub(/\/Applications\//, "", cmd)
     gsub(/\.app\/Contents\/MacOS\//, " ", cmd)
     gsub(/\.app\/Contents\/Frameworks\//, " fwk/", cmd)
@@ -92,10 +100,10 @@ NR > 1 && NR <= n+1 && $2 > 0 {
 echo ""
 
 # --- Grouped App Totals ---
-echo -e "${BOLD}${CYAN}=== Grouped App Totals (>50 MB) ===${RESET}"
+echo "=== Grouped App Totals (>50 MB) ==="
 echo ""
-printf "  ${DIM}%10s  %s${RESET}\n" "TOTAL" "APP GROUP"
-printf "  ${DIM}%10s  %s${RESET}\n" "-----" "---------"
+printf "  %10s  %s\n" "TOTAL" "APP GROUP"
+printf "  %10s  %s\n" "-----" "---------"
 
 ps -eo rss,comm | awk '
 NR > 1 && $1 > 0 {
@@ -134,7 +142,6 @@ END {
             n++
         }
     }
-    # simple sort descending
     for (i = 0; i < n; i++)
         for (j = i+1; j < n; j++)
             if (arr[j] > arr[i]) { t=arr[i]; arr[i]=arr[j]; arr[j]=t; tn=names[i]; names[i]=names[j]; names[j]=tn }

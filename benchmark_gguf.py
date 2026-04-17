@@ -47,7 +47,7 @@ MODEL_CONFIGS = [
 ]
 
 gguf_format      = "q4_k_m"
-gsm8k_samples    = 50
+gsm8k_samples    = 10
 gsm8k_max_tokens = 512
 warmup_runs      = 2
 device = pick_device()

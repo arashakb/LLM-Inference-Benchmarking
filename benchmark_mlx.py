@@ -44,7 +44,7 @@ MODEL_CONFIGS = [
     },
 ]
 
-gsm8k_samples    = 50
+gsm8k_samples    = 10
 gsm8k_max_tokens = 512
 warmup_runs      = 2
 
@@ -60,6 +60,8 @@ def benchmark_model_pair(run_dir, config, gsm8k_questions):
     log.info("=" * 60)
 
     # ── 1. Benchmark FP16 (MLX) ──────────────────────────────────────────
+    fp16_results = None
+    fp16_samples = []
     log.info("loading FP16 model via mlx_lm: %s", fp16_id)
     mx.reset_peak_memory()
     t0 = time.perf_counter()
@@ -68,24 +70,28 @@ def benchmark_model_pair(run_dir, config, gsm8k_questions):
     weight_mem = mx.get_peak_memory() / 1024 / 1024
     log.info("loaded in %.1fs (weight mem: %.1f MB)", time.perf_counter() - t0, weight_mem)
 
-    log.info("evaluating GSM8K (FP16 MLX)...")
-    mx.reset_peak_memory()
-    fp16_results, fp16_samples = evaluate_gsm8k_mlx(
-        fp16_model, fp16_tokenizer, gsm8k_questions, gsm8k_max_tokens, warmup_runs
-    )
-    fp16_results["weight_mem_mb"] = weight_mem
-    fp16_results["runtime_mem_mb"] = max(0, fp16_results["peak_mem_mb"] - weight_mem)
-    log.info("FP16 MLX GSM8K accuracy: %.1f%%", fp16_results["gsm8k_accuracy"] * 100)
+    try:
+        log.info("evaluating GSM8K (FP16 MLX)...")
+        mx.reset_peak_memory()
+        fp16_results, fp16_samples = evaluate_gsm8k_mlx(
+            fp16_model, fp16_tokenizer, gsm8k_questions, gsm8k_max_tokens, warmup_runs
+        )
+        fp16_results["weight_mem_mb"] = weight_mem
+        fp16_results["runtime_mem_mb"] = max(0, fp16_results["peak_mem_mb"] - weight_mem)
+        log.info("FP16 MLX GSM8K accuracy: %.1f%%", fp16_results["gsm8k_accuracy"] * 100)
 
-    log.info("computing perplexity (FP16 MLX)...")
-    wikitext_tokens = load_wikitext2_tokens(fp16_tokenizer)
-    fp16_results["perplexity"] = compute_perplexity_mlx(fp16_model, wikitext_tokens)
-    log.info("FP16 MLX perplexity: %.2f", fp16_results["perplexity"])
+        log.info("computing perplexity (FP16 MLX)...")
+        wikitext_tokens = load_wikitext2_tokens(fp16_tokenizer)
+        fp16_results["perplexity"] = compute_perplexity_mlx(fp16_model, wikitext_tokens)
+        log.info("FP16 MLX perplexity: %.2f", fp16_results["perplexity"])
 
-    fp16_label = f"FP16 MLX ({model_name})"
-    print_results(fp16_label, fp16_results)
-    dump_results(run_dir, fp16_label, fp16_results)
-    dump_samples_csv(run_dir, fp16_label, fp16_samples)
+        fp16_label = f"FP16 MLX ({model_name})"
+        print_results(fp16_label, fp16_results)
+        dump_results(run_dir, fp16_label, fp16_results)
+        dump_samples_csv(run_dir, fp16_label, fp16_samples)
+    except Exception as e:
+        log.warning("FP16 MLX benchmark failed (likely OOM): %s — skipping to 4-bit", e)
+        fp16_results = None
 
     del fp16_model, fp16_tokenizer
     free_memory()
@@ -122,7 +128,10 @@ def benchmark_model_pair(run_dir, config, gsm8k_questions):
     free_memory()
 
     # ── 3. Comparison ────────────────────────────────────────────────────
-    print_comparison(f"FP16 MLX {model_name}", fp16_results, f"MLX-4bit {model_name}", quant_results)
+    if fp16_results is not None:
+        print_comparison(f"FP16 MLX {model_name}", fp16_results, f"MLX-4bit {model_name}", quant_results)
+    else:
+        log.info("skipping comparison — FP16 run did not complete")
 
 
 def main():

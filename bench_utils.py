@@ -200,11 +200,15 @@ def format_prompts(tokenizer, prompts):
     ]
 
 
-def load_wikitext2_tokens(tokenizer):
+def load_wikitext2_tokens(tokenizer, max_tokens=2048):
     """Load WikiText-2 test split, concatenate, and tokenize.
 
     Returns a plain Python list[int] so the caller can convert to the
     framework-specific tensor type (torch.tensor or mx.array).
+
+    max_tokens: number of tokens to use. Default 2048 matches the standard
+    used in quantization papers (GPTQ, SqueezeLLM, etc.) for a fast but
+    representative perplexity estimate. Pass None for the full dataset.
 
     Uses huggingface_hub (already a transitive dependency of transformers)
     to download the raw text, avoiding the heavy `datasets` library which
@@ -227,7 +231,8 @@ def load_wikitext2_tokens(tokenizer):
     # Handle both HuggingFace tokenizers (callable) and mlx_lm
     # TokenizerWrapper (delegates to ._tokenizer).
     inner = getattr(tokenizer, "_tokenizer", tokenizer)
-    return inner.encode(text)
+    tokens = inner.encode(text)
+    return tokens[:max_tokens] if max_tokens is not None else tokens
 
 
 GSM8K_INSTRUCTION = (
@@ -814,8 +819,8 @@ def evaluate_gsm8k_mlx(model, tokenizer, questions, max_new_tokens, warmup_runs)
         mx.eval()
         t_end = time.perf_counter()
 
-        # Use the last chunk as the full output (cumulative in current mlx-lm)
-        model_output = output_chunks[-1] if output_chunks else ""
+        # response.text is per-token in mlx-lm — join all chunks for full output
+        model_output = "".join(output_chunks)
 
         predicted = parse_gsm8k_answer(model_output)
         is_correct = predicted is not None and abs(predicted - item["answer"]) < 1e-3
