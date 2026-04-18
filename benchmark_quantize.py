@@ -27,6 +27,7 @@ log = logging.getLogger("bench")
 
 # ── Configuration ──────────────────────────────────────────────
 MODEL_CONFIGS = [
+    # ── 4-bit (index 0–2) ──
     {
         "name": "Qwen2.5-7B-Instruct",
         "fp16_id": "Qwen/Qwen2.5-7B-Instruct",
@@ -41,6 +42,22 @@ MODEL_CONFIGS = [
         "name": "Gemma-2-9B-it",
         "fp16_id": "google/gemma-2-9b-it",
         "quant_id": "ModelCloud/gemma-2-9b-it-gptq-4bit",
+    },
+    # ── 2-bit (index 3–5) ──
+    {
+        "name": "Qwen2.5-7B-Instruct",
+        "fp16_id": "Qwen/Qwen2.5-7B-Instruct",
+        "quant_id": "kaitchup/Qwen2.5-7B-Instruct-gptqmodel-2bit",
+    },
+    {
+        "name": "Llama-3.1-8B-Instruct",
+        "fp16_id": "meta-llama/Llama-3.1-8B-Instruct",
+        "quant_id": "kaitchup/Llama-3.1-8B-Instruct-gptqmodel-2bit",
+    },
+    {
+        "name": "Gemma-2-9B-it",
+        "fp16_id": "google/gemma-2-9b-it",
+        "quant_id": "irish-quant/google-gemma-2-9b-it-2bit",
     },
 ]
 
@@ -67,37 +84,43 @@ def benchmark_model_pair(run_dir, config, gsm8k_questions):
     log.info("=" * 60)
 
     # ── 1. Benchmark FP16 via GPTQModel ──────────────────────────────────
-    log.info("loading FP16 model via GPTQModel: %s", fp16_id)
-    reset_peak_memory(device)
-    t0 = time.perf_counter()
-    fp16_model = GPTQModel.load(fp16_id, device=device)
-    sync_device(device)
-    weight_mem = get_weight_memory_mb(device)
-    log.info("loaded in %.1fs (weight mem: %.1f MB)", time.perf_counter() - t0, weight_mem)
-
+    fp16_results = None
     tokenizer = AutoTokenizer.from_pretrained(fp16_id)
     if not tokenizer.pad_token_id:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    log.info("evaluating GSM8K (FP16)...")
-    reset_peak_memory(device)
-    fp16_results, fp16_samples = evaluate_gsm8k(fp16_model, tokenizer, gsm8k_questions, gsm8k_max_tokens, warmup_runs, device)
-    fp16_results["weight_mem_mb"] = weight_mem
-    fp16_results["runtime_mem_mb"] = max(0, fp16_results["peak_mem_mb"] - weight_mem)
-    log.info("FP16 GSM8K accuracy: %.1f%%", fp16_results["gsm8k_accuracy"] * 100)
+    try:
+        log.info("loading FP16 model via GPTQModel: %s", fp16_id)
+        reset_peak_memory(device)
+        t0 = time.perf_counter()
+        fp16_model = GPTQModel.load(fp16_id, device=device)
+        sync_device(device)
+        weight_mem = get_weight_memory_mb(device)
+        log.info("loaded in %.1fs (weight mem: %.1f MB)", time.perf_counter() - t0, weight_mem)
 
-    log.info("computing perplexity (FP16)...")
-    wikitext_tokens = load_wikitext2_tokens(tokenizer)
-    fp16_results["perplexity"] = compute_perplexity(fp16_model, wikitext_tokens, device)
-    log.info("FP16 perplexity: %.2f", fp16_results["perplexity"])
+        log.info("evaluating GSM8K (FP16)...")
+        reset_peak_memory(device)
+        fp16_results, fp16_samples = evaluate_gsm8k(fp16_model, tokenizer, gsm8k_questions, gsm8k_max_tokens, warmup_runs, device)
+        fp16_results["weight_mem_mb"] = weight_mem
+        fp16_results["runtime_mem_mb"] = max(0, fp16_results["peak_mem_mb"] - weight_mem)
+        log.info("FP16 GSM8K accuracy: %.1f%%", fp16_results["gsm8k_accuracy"] * 100)
 
-    fp16_label = f"FP16 ({model_name})"
-    print_results(fp16_label, fp16_results)
-    dump_results(run_dir, fp16_label, fp16_results)
-    dump_samples_csv(run_dir, fp16_label, fp16_samples)
+        log.info("computing perplexity (FP16)...")
+        wikitext_tokens = load_wikitext2_tokens(tokenizer)
+        fp16_results["perplexity"] = compute_perplexity(fp16_model, wikitext_tokens, device)
+        log.info("FP16 perplexity: %.2f", fp16_results["perplexity"])
 
-    del fp16_model
-    free_memory()
+        fp16_label = f"FP16 ({model_name})"
+        print_results(fp16_label, fp16_results)
+        dump_results(run_dir, fp16_label, fp16_results)
+        dump_samples_csv(run_dir, fp16_label, fp16_samples)
+
+        del fp16_model
+        free_memory()
+    except Exception as e:
+        log.warning("FP16 benchmark failed: %s — skipping to quantized model", e)
+        fp16_results = None
+        free_memory()
 
     # ── 2. Benchmark pre-quantized GPTQ model ────────────────────────────
     log.info("loading pre-quantized GPTQ model: %s", quant_id)
@@ -137,7 +160,10 @@ def benchmark_model_pair(run_dir, config, gsm8k_questions):
     free_memory()
 
     # ── 3. Comparison ─────────────────────────────────────────────────────
-    print_comparison(f"FP16 {model_name}", fp16_results, f"GPTQ-4bit {model_name}", quant_results)
+    if fp16_results is not None:
+        print_comparison(f"FP16 {model_name}", fp16_results, f"GPTQ {model_name}", quant_results)
+    else:
+        log.info("skipping comparison — FP16 run did not complete")
 
 
 def main():

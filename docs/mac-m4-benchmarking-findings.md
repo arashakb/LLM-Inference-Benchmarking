@@ -163,3 +163,59 @@ Key observations:
   during the forward pass even though weight footprint is smaller
 - GSM8K accuracy identical at this small sample size (10 questions); larger
   sample needed to detect real differences
+
+---
+
+## 6. 2-bit quantization: what works on Apple Silicon
+
+### What we tested
+
+All GPTQ 2-bit (kaitchup, irish-quant) and GGUF Q2_K configs were run and
+failed on Mac Mini M4 Pro.
+
+### GPTQ 2-bit on MPS: `Placeholder storage has not been allocated`
+
+GPTQModel loads 2-bit GPTQ weights as meta/placeholder tensors that never
+get materialized on MPS. The embedding layer weight exists as a lazy tensor;
+when `torch.embedding()` tries to use it, PyTorch finds no actual memory
+backing. Related: [pytorch#123995](https://github.com/pytorch/pytorch/issues/123995).
+
+- Weight memory reports 1.5 MB (vs expected ~2-3 GB) — weights never materialized
+- Occurs for all 3 models (Qwen, Llama, Gemma)
+- 4-bit GPTQ works on MPS; 2-bit does not
+- `PYTORCH_ENABLE_MPS_FALLBACK=1` does not help (issue is unallocated storage, not missing ops)
+
+### GGUF Q2_K via GGUF_TORCH: not supported
+
+GPTQModel's `GGUFConfig` does not support `q2_k` format on the GGUF_TORCH
+backend. Even if it did, GGUF_TORCH is pure-PyTorch dequantization without
+Metal kernels — performance would be worse than FP16.
+
+Native llama.cpp DOES support Q2_K on Metal (hand-written Metal shaders in
+`ggml-metal`), but that requires using llama.cpp directly, not GPTQModel.
+
+### MLX 2-bit: works natively (recommended)
+
+MLX supports **2, 3, 4, 5, 6, and 8-bit** affine quantization with optimized
+Metal kernels via `mx.core.quantized_matmul`. No pre-quantized 2-bit models
+exist on `mlx-community` for our target models, but self-quantization is
+straightforward:
+
+```bash
+mlx_lm.convert --hf-path Qwen/Qwen2.5-7B-Instruct --q-bits 2 --q-group-size 64 -o models/Qwen2.5-7B-Instruct-mlx-2bit
+```
+
+### Summary: 2-bit support by framework on Apple Silicon
+
+| Framework | 2-bit support | Notes |
+|-----------|:---:|-------|
+| **MLX** | ✅ | Native Metal kernels, self-quantize with `mlx_lm.convert --q-bits 2` |
+| **GPTQ (GPTQModel on MPS)** | ❌ | Placeholder storage error; needs CUDA |
+| **GPTQ (GPTQModel on CPU)** | ⚠️ | Functional but extremely slow |
+| **GGUF (GGUF_TORCH)** | ❌ | Q2_K format not supported |
+| **GGUF (native llama.cpp Metal)** | ✅ | Works but slow on Apple Silicon for sub-4-bit |
+
+### Recommendation
+
+For 2-bit benchmarks on Apple Silicon, use MLX exclusively. GPTQ and GGUF
+2-bit require CUDA or native llama.cpp respectively.

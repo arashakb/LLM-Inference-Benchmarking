@@ -29,24 +29,47 @@ log = logging.getLogger("bench")
 
 # ── Configuration ──────────────────────────────────────────────
 MODEL_CONFIGS = [
+    # ── Q4_K_M (index 0–2) ──
     {
         "name": "Qwen2.5-7B-Instruct",
         "fp16_id": "Qwen/Qwen2.5-7B-Instruct",
         "quant_path": "models/Qwen2.5-7B-Instruct-GGUF-Q4_K_M",
+        "gguf_format": "q4_k_m",
     },
     {
         "name": "Llama-3.1-8B-Instruct",
         "fp16_id": "meta-llama/Llama-3.1-8B-Instruct",
         "quant_path": "models/Llama-3.1-8B-Instruct-GGUF-Q4_K_M",
+        "gguf_format": "q4_k_m",
     },
     {
         "name": "Gemma-2-9B-it",
         "fp16_id": "google/gemma-2-9b-it",
         "quant_path": "models/Gemma-2-9B-it-GGUF-Q4_K_M",
+        "gguf_format": "q4_k_m",
+    },
+    # ── Q2_K (index 3–5) ──
+    {
+        "name": "Qwen2.5-7B-Instruct",
+        "fp16_id": "Qwen/Qwen2.5-7B-Instruct",
+        "quant_path": "models/Qwen2.5-7B-Instruct-GGUF-Q2_K",
+        "gguf_format": "q2_k",
+    },
+    {
+        "name": "Llama-3.1-8B-Instruct",
+        "fp16_id": "meta-llama/Llama-3.1-8B-Instruct",
+        "quant_path": "models/Llama-3.1-8B-Instruct-GGUF-Q2_K",
+        "gguf_format": "q2_k",
+    },
+    {
+        "name": "Gemma-2-9B-it",
+        "fp16_id": "google/gemma-2-9b-it",
+        "quant_path": "models/Gemma-2-9B-it-GGUF-Q2_K",
+        "gguf_format": "q2_k",
     },
 ]
 
-gguf_format      = "q4_k_m"
+gguf_format      = "q4_k_m"  # default, overridden by per-config gguf_format
 gsm8k_samples    = 10
 gsm8k_max_tokens = 512
 warmup_runs      = 2
@@ -61,10 +84,11 @@ def get_weight_memory_mb(device):
 
 
 def benchmark_model_pair(run_dir, config, gsm8k_questions, gguf_backend):
-    """Run FP16 vs GGUF Q4_K_M benchmark for a single model config."""
+    """Run FP16 vs GGUF benchmark for a single model config."""
     model_name = config["name"]
     fp16_id = config["fp16_id"]
     quant_path = config["quant_path"]
+    fmt = config.get("gguf_format", gguf_format)
 
     log.info("=" * 60)
     log.info("MODEL: %s", model_name)
@@ -75,40 +99,47 @@ def benchmark_model_pair(run_dir, config, gsm8k_questions, gguf_backend):
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     # ── 1. Benchmark FP16 via GPTQModel ──────────────────────────────────
-    log.info("loading FP16 model via GPTQModel: %s", fp16_id)
-    reset_peak_memory(device)
-    t0 = time.perf_counter()
-    fp16_model = GPTQModel.load(fp16_id, device=device)
-    sync_device(device)
-    weight_mem = get_peak_memory_mb(device)
-    log.info("loaded in %.1fs (weight mem: %.1f MB)", time.perf_counter() - t0, weight_mem)
+    fp16_results = None
+    try:
+        log.info("loading FP16 model via GPTQModel: %s", fp16_id)
+        reset_peak_memory(device)
+        t0 = time.perf_counter()
+        fp16_model = GPTQModel.load(fp16_id, device=device)
+        sync_device(device)
+        weight_mem = get_peak_memory_mb(device)
+        log.info("loaded in %.1fs (weight mem: %.1f MB)", time.perf_counter() - t0, weight_mem)
 
-    log.info("evaluating GSM8K (FP16)...")
-    reset_peak_memory(device)
-    fp16_results, fp16_samples = evaluate_gsm8k(fp16_model, tokenizer, gsm8k_questions, gsm8k_max_tokens, warmup_runs, device)
-    fp16_results["weight_mem_mb"] = weight_mem
-    fp16_results["runtime_mem_mb"] = max(0, fp16_results["peak_mem_mb"] - weight_mem)
-    log.info("FP16 GSM8K accuracy: %.1f%%", fp16_results["gsm8k_accuracy"] * 100)
+        log.info("evaluating GSM8K (FP16)...")
+        reset_peak_memory(device)
+        fp16_results, fp16_samples = evaluate_gsm8k(fp16_model, tokenizer, gsm8k_questions, gsm8k_max_tokens, warmup_runs, device)
+        fp16_results["weight_mem_mb"] = weight_mem
+        fp16_results["runtime_mem_mb"] = max(0, fp16_results["peak_mem_mb"] - weight_mem)
+        log.info("FP16 GSM8K accuracy: %.1f%%", fp16_results["gsm8k_accuracy"] * 100)
 
-    log.info("computing perplexity (FP16)...")
-    wikitext_tokens = load_wikitext2_tokens(tokenizer)
-    fp16_results["perplexity"] = compute_perplexity(fp16_model, wikitext_tokens, device)
-    log.info("FP16 perplexity: %.2f", fp16_results["perplexity"])
+        log.info("computing perplexity (FP16)...")
+        wikitext_tokens = load_wikitext2_tokens(tokenizer)
+        fp16_results["perplexity"] = compute_perplexity(fp16_model, wikitext_tokens, device)
+        log.info("FP16 perplexity: %.2f", fp16_results["perplexity"])
 
-    fp16_label = f"FP16 ({model_name})"
-    print_results(fp16_label, fp16_results)
-    dump_results(run_dir, fp16_label, fp16_results)
-    dump_samples_csv(run_dir, fp16_label, fp16_samples)
+        fp16_label = f"FP16 ({model_name})"
+        print_results(fp16_label, fp16_results)
+        dump_results(run_dir, fp16_label, fp16_results)
+        dump_samples_csv(run_dir, fp16_label, fp16_samples)
 
-    del fp16_model
-    free_memory()
+        del fp16_model
+        free_memory()
+    except Exception as e:
+        log.warning("FP16 benchmark failed: %s — skipping to quantized model", e)
+        fp16_results = None
+        free_memory()
 
-    # ── 2. Quantize (GGUF Q4_K_M) — skip if already saved ────────────────
+    # ── 2. Quantize (GGUF) — skip if already saved ─────────────────────────
     if os.path.isdir(quant_path):
         log.info("quantized model found at %s, skipping quantization.", quant_path)
     else:
-        log.info("quantizing model (GGUF %s)...", gguf_format)
-        qconfig = GGUFConfig(bits=4, format=gguf_format)
+        log.info("quantizing model (GGUF %s)...", fmt)
+        bits = 2 if "q2" in fmt else 4
+        qconfig = GGUFConfig(bits=bits, format=fmt)
 
         quant_model = GPTQModel.load(fp16_id, qconfig)
 
@@ -136,19 +167,19 @@ def benchmark_model_pair(run_dir, config, gsm8k_questions, gguf_backend):
     if not quant_tokenizer.pad_token_id:
         quant_tokenizer.pad_token_id = quant_tokenizer.eos_token_id
 
-    log.info("evaluating GSM8K (GGUF %s)...", gguf_format)
+    log.info("evaluating GSM8K (GGUF %s)...", fmt)
     reset_peak_memory(device)
     quant_results, quant_samples = evaluate_gsm8k(quant_model, quant_tokenizer, gsm8k_questions, gsm8k_max_tokens, warmup_runs, device)
     quant_results["weight_mem_mb"] = quant_weight_mem
     quant_results["runtime_mem_mb"] = max(0, quant_results["peak_mem_mb"] - quant_weight_mem)
     log.info("GGUF GSM8K accuracy: %.1f%%", quant_results["gsm8k_accuracy"] * 100)
 
-    log.info("computing perplexity (GGUF %s)...", gguf_format)
+    log.info("computing perplexity (GGUF %s)...", fmt)
     quant_wikitext_tokens = load_wikitext2_tokens(quant_tokenizer)
     quant_results["perplexity"] = compute_perplexity(quant_model, quant_wikitext_tokens, device)
     log.info("GGUF perplexity: %.2f", quant_results["perplexity"])
 
-    quant_label = f"GGUF {gguf_format} ({model_name})"
+    quant_label = f"GGUF {fmt} ({model_name})"
     print_results(quant_label, quant_results)
     dump_results(run_dir, quant_label, quant_results)
     dump_samples_csv(run_dir, quant_label, quant_samples)
@@ -157,7 +188,10 @@ def benchmark_model_pair(run_dir, config, gsm8k_questions, gguf_backend):
     free_memory()
 
     # ── 4. Comparison ─────────────────────────────────────────────────────
-    print_comparison(f"FP16 {model_name}", fp16_results, f"GGUF-{gguf_format} {model_name}", quant_results)
+    if fp16_results is not None:
+        print_comparison(f"FP16 {model_name}", fp16_results, f"GGUF-{fmt} {model_name}", quant_results)
+    else:
+        log.info("skipping comparison — FP16 run did not complete")
 
 
 def main():

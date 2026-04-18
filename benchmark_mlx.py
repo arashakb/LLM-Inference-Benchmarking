@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 import time
 
@@ -27,6 +28,7 @@ log = logging.getLogger("bench")
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 MODEL_CONFIGS = [
+    # ── 4-bit (index 0–2) ──
     {
         "name": "Qwen2.5-7B-Instruct",
         "fp16_id": "Qwen/Qwen2.5-7B-Instruct",
@@ -41,6 +43,25 @@ MODEL_CONFIGS = [
         "name": "Gemma-2-9B-it",
         "fp16_id": "google/gemma-2-9b-it",
         "quant_id": "mlx-community/gemma-2-9b-it-4bit",
+    },
+    # ── 2-bit (index 3–5) — self-quantized via mlx_lm.convert ──
+    {
+        "name": "Qwen2.5-7B-Instruct",
+        "fp16_id": "Qwen/Qwen2.5-7B-Instruct",
+        "quant_id": "models/Qwen2.5-7B-Instruct-mlx-2bit",
+        "quant_bits": 2,
+    },
+    {
+        "name": "Llama-3.1-8B-Instruct",
+        "fp16_id": "meta-llama/Llama-3.1-8B-Instruct",
+        "quant_id": "models/Llama-3.1-8B-Instruct-mlx-2bit",
+        "quant_bits": 2,
+    },
+    {
+        "name": "Gemma-2-9B-it",
+        "fp16_id": "google/gemma-2-9b-it",
+        "quant_id": "models/Gemma-2-9B-it-mlx-2bit",
+        "quant_bits": 2,
     },
 ]
 
@@ -96,7 +117,24 @@ def benchmark_model_pair(run_dir, config, gsm8k_questions):
     del fp16_model, fp16_tokenizer
     free_memory()
 
-    # ── 2. Benchmark MLX 4-bit ───────────────────────────────────────────
+    # ── 2. Benchmark MLX quantized ─────────────────────────────────────────
+    quant_bits = config.get("quant_bits", 4)
+
+    # Self-quantize if quant_id is a local path that doesn't exist yet
+    if not quant_id.startswith(("models/", "/", ".")) or os.path.isdir(quant_id):
+        pass  # HF hub model or already quantized locally
+    else:
+        log.info("self-quantizing %s to %d-bit at %s...", fp16_id, quant_bits, quant_id)
+        import subprocess
+        subprocess.run([
+            sys.executable, "-m", "mlx_lm.convert",
+            "--hf-path", fp16_id,
+            "--q-bits", str(quant_bits),
+            "--q-group-size", "64",
+            "-o", quant_id,
+        ], check=True)
+        log.info("self-quantization complete: %s", quant_id)
+
     log.info("loading MLX-quantized model: %s", quant_id)
     mx.reset_peak_memory()
     t0 = time.perf_counter()
@@ -105,21 +143,21 @@ def benchmark_model_pair(run_dir, config, gsm8k_questions):
     quant_weight_mem = mx.get_peak_memory() / 1024 / 1024
     log.info("loaded in %.1fs (weight mem: %.1f MB)", time.perf_counter() - t0, quant_weight_mem)
 
-    log.info("evaluating GSM8K (MLX 4-bit)...")
+    log.info("evaluating GSM8K (MLX %d-bit)...", quant_bits)
     mx.reset_peak_memory()
     quant_results, quant_samples = evaluate_gsm8k_mlx(
         quant_model, quant_tokenizer, gsm8k_questions, gsm8k_max_tokens, warmup_runs
     )
     quant_results["weight_mem_mb"] = quant_weight_mem
     quant_results["runtime_mem_mb"] = max(0, quant_results["peak_mem_mb"] - quant_weight_mem)
-    log.info("MLX 4-bit GSM8K accuracy: %.1f%%", quant_results["gsm8k_accuracy"] * 100)
+    log.info("MLX %d-bit GSM8K accuracy: %.1f%%", quant_bits, quant_results["gsm8k_accuracy"] * 100)
 
-    log.info("computing perplexity (MLX 4-bit)...")
+    log.info("computing perplexity (MLX %d-bit)...", quant_bits)
     quant_wikitext_tokens = load_wikitext2_tokens(quant_tokenizer)
     quant_results["perplexity"] = compute_perplexity_mlx(quant_model, quant_wikitext_tokens)
-    log.info("MLX 4-bit perplexity: %.2f", quant_results["perplexity"])
+    log.info("MLX %d-bit perplexity: %.2f", quant_bits, quant_results["perplexity"])
 
-    quant_label = f"MLX 4-bit ({model_name})"
+    quant_label = f"MLX {quant_bits}-bit ({model_name})"
     print_results(quant_label, quant_results)
     dump_results(run_dir, quant_label, quant_results)
     dump_samples_csv(run_dir, quant_label, quant_samples)
@@ -129,7 +167,7 @@ def benchmark_model_pair(run_dir, config, gsm8k_questions):
 
     # ── 3. Comparison ────────────────────────────────────────────────────
     if fp16_results is not None:
-        print_comparison(f"FP16 MLX {model_name}", fp16_results, f"MLX-4bit {model_name}", quant_results)
+        print_comparison(f"FP16 MLX {model_name}", fp16_results, f"MLX-{quant_bits}bit {model_name}", quant_results)
     else:
         log.info("skipping comparison — FP16 run did not complete")
 
