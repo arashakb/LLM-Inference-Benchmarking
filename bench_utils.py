@@ -157,7 +157,7 @@ def sync_device(device):
         torch.mps.synchronize()
 
 
-def get_peak_memory_mb(device="cuda:0"):
+def get_peak_memory_mb(device):
     if _is_cuda(device) and torch.cuda.is_available():
         return torch.cuda.max_memory_allocated(device) / 1024 / 1024
     if _is_mps(device) and torch.backends.mps.is_available():
@@ -167,7 +167,7 @@ def get_peak_memory_mb(device="cuda:0"):
     return 0.0
 
 
-def reset_peak_memory(device="cuda:0"):
+def reset_peak_memory(device):
     if _is_cuda(device) and torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats(device)
     # MPS has no equivalent reset; silently no-op.

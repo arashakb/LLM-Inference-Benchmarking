@@ -117,6 +117,11 @@ def benchmark_model_pair(run_dir, config, gsm8k_questions):
 
         del fp16_model
         free_memory()
+    except torch.cuda.OutOfMemoryError as e:
+        log.warning("FP16 CUDA OOM: %s — clearing cache and skipping to quantized model", e)
+        fp16_results = None
+        torch.cuda.empty_cache()
+        free_memory()
     except Exception as e:
         log.warning("FP16 benchmark failed: %s — skipping to quantized model", e)
         fp16_results = None

@@ -128,6 +128,11 @@ def benchmark_model_pair(run_dir, config, gsm8k_questions, gguf_backend):
 
         del fp16_model
         free_memory()
+    except torch.cuda.OutOfMemoryError as e:
+        log.warning("FP16 CUDA OOM: %s — clearing cache and skipping to quantized model", e)
+        fp16_results = None
+        torch.cuda.empty_cache()
+        free_memory()
     except Exception as e:
         log.warning("FP16 benchmark failed: %s — skipping to quantized model", e)
         fp16_results = None
@@ -157,7 +162,9 @@ def benchmark_model_pair(run_dir, config, gsm8k_questions, gguf_backend):
     reset_peak_memory(device)
     t0 = time.perf_counter()
     quant_model = GPTQModel.load(quant_path, backend=gguf_backend, device=device)
-    if device != "cpu" and hasattr(quant_model, "model"):
+    # MPS needs explicit .to(device) — GPTQModel leaves some layers on CPU.
+    # On CUDA, GPTQModel handles placement via device_map; skip to avoid conflicts.
+    if str(device).startswith("mps") and hasattr(quant_model, "model"):
         quant_model.model.to(device)
     sync_device(device)
     quant_weight_mem = get_peak_memory_mb(device)
