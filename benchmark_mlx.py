@@ -6,14 +6,12 @@ import time
 
 from bench_utils import (
     compute_perplexity_mlx,
-    dump_results,
     dump_results_table,
-    dump_samples_csv,
     evaluate_gsm8k_mlx,
+    finalize_result,
     free_memory,
     load_gsm8k_questions,
     load_wikitext2_tokens,
-    print_results,
     print_results_table,
     setup_run_logging,
 )
@@ -146,8 +144,6 @@ def benchmark_run(run_dir, config, gsm8k_questions):
         results, samples = evaluate_gsm8k_mlx(
             model, tokenizer, gsm8k_questions, gsm8k_max_tokens, warmup_runs
         )
-        results["weight_mem_mb"] = weight_mem
-        results["runtime_mem_mb"] = max(0, results["peak_mem_mb"] - weight_mem)
         log.info("GSM8K accuracy: %.1f%%", results["gsm8k_accuracy"] * 100)
 
         log.info("computing perplexity...")
@@ -155,13 +151,7 @@ def benchmark_run(run_dir, config, gsm8k_questions):
         results["perplexity"] = compute_perplexity_mlx(model, wikitext_tokens)
         log.info("perplexity: %.2f", results["perplexity"])
 
-        print_results(label, results)
-        dump_results(run_dir, label, results)
-        dump_samples_csv(run_dir, label, samples)
-
-        results["name"] = name
-        results["variant"] = variant
-        return results
+        return finalize_result(run_dir, label, results, samples, name, variant, weight_mem)
     except Exception as e:
         log.warning("run failed (likely OOM): %s — skipping", e)
         return None

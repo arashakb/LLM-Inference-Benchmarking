@@ -651,6 +651,24 @@ def print_results(label, r):
     log.info("\n".join(lines))
 
 
+def finalize_result(run_dir, label, results, samples, name, variant, weight_mem_mb):
+    """Attach memory metadata, persist per-run JSON + samples CSV, log the
+    formatted summary, and return the augmented row ready for aggregation.
+
+    Shared by the per-framework `benchmark_run` functions so the bookkeeping
+    around each eval (weight/runtime split, file output, name/variant tags)
+    stays in one place.
+    """
+    results["weight_mem_mb"] = weight_mem_mb
+    results["runtime_mem_mb"] = max(0, results["peak_mem_mb"] - weight_mem_mb)
+    print_results(label, results)
+    dump_results(run_dir, label, results)
+    dump_samples_csv(run_dir, label, samples)
+    results["name"] = name
+    results["variant"] = variant
+    return results
+
+
 def print_comparison(label_a, results_a, label_b, results_b):
     def delta(b, a):
         if a == 0:
