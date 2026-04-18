@@ -232,6 +232,9 @@ def load_wikitext2_tokens(tokenizer, max_tokens=2048):
     # TokenizerWrapper (delegates to ._tokenizer).
     inner = getattr(tokenizer, "_tokenizer", tokenizer)
     tokens = inner.encode(text)
+    # tokenizers.Encoding (fast tokenizer backend) is not subscriptable — extract ids
+    if hasattr(tokens, "ids"):
+        tokens = tokens.ids
     return tokens[:max_tokens] if max_tokens is not None else tokens
 
 
