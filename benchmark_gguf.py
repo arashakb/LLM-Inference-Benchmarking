@@ -27,6 +27,15 @@ from bench_utils import (
 
 log = logging.getLogger("bench")
 
+# ── Storage paths ──────────────────────────────────────────────────────────────
+# During GGUF quantization GPTQModel offloads all model layers to disk
+# (~13 GB for a 7B model). Direct both the offload temp dir and the saved
+# quantized models to the network share (HF_HOME) so the local disk doesn't
+# fill up.
+_HF_HOME = os.environ.get("HF_HOME", os.path.expanduser("~"))
+GGUF_MODEL_DIR = os.path.join(_HF_HOME, "gguf_models")
+GGUF_OFFLOAD_DIR = os.path.join(_HF_HOME, "gptqmodel_offload")
+
 # Script-level runtime identity — stamped onto every result.
 # Note: gptqmodel is the quant *toolkit* that dispatches kernels; the
 # generation loop itself runs inside HuggingFace transformers, so that's the
@@ -53,7 +62,7 @@ RUN_CONFIGS = [
         "quant_method": "k-quant",
         "quant_bits": 4,
         "quant_format": "Q4_K_M",
-        "model_id": "models/Qwen2.5-7B-Instruct-GGUF-Q4_K_M",
+        "model_id": os.path.join(GGUF_MODEL_DIR, "Qwen2.5-7B-Instruct-GGUF-Q4_K_M"),
         "gguf_format": "q4_k_m",
         "source_fp16": "Qwen/Qwen2.5-7B-Instruct",
     },
@@ -63,7 +72,7 @@ RUN_CONFIGS = [
         "quant_method": "k-quant",
         "quant_bits": 2,
         "quant_format": "Q2_K",
-        "model_id": "models/Qwen2.5-7B-Instruct-GGUF-Q2_K",
+        "model_id": os.path.join(GGUF_MODEL_DIR, "Qwen2.5-7B-Instruct-GGUF-Q2_K"),
         "gguf_format": "q2_k",
         "source_fp16": "Qwen/Qwen2.5-7B-Instruct",
     },
@@ -81,7 +90,7 @@ RUN_CONFIGS = [
         "quant_method": "k-quant",
         "quant_bits": 4,
         "quant_format": "Q4_K_M",
-        "model_id": "models/Llama-3.1-8B-Instruct-GGUF-Q4_K_M",
+        "model_id": os.path.join(GGUF_MODEL_DIR, "Llama-3.1-8B-Instruct-GGUF-Q4_K_M"),
         "gguf_format": "q4_k_m",
         "source_fp16": "meta-llama/Llama-3.1-8B-Instruct",
     },
@@ -91,7 +100,7 @@ RUN_CONFIGS = [
         "quant_method": "k-quant",
         "quant_bits": 2,
         "quant_format": "Q2_K",
-        "model_id": "models/Llama-3.1-8B-Instruct-GGUF-Q2_K",
+        "model_id": os.path.join(GGUF_MODEL_DIR, "Llama-3.1-8B-Instruct-GGUF-Q2_K"),
         "gguf_format": "q2_k",
         "source_fp16": "meta-llama/Llama-3.1-8B-Instruct",
     },
@@ -109,7 +118,7 @@ RUN_CONFIGS = [
         "quant_method": "k-quant",
         "quant_bits": 4,
         "quant_format": "Q4_K_M",
-        "model_id": "models/Gemma-2-9B-it-GGUF-Q4_K_M",
+        "model_id": os.path.join(GGUF_MODEL_DIR, "Gemma-2-9B-it-GGUF-Q4_K_M"),
         "gguf_format": "q4_k_m",
         "source_fp16": "google/gemma-2-9b-it",
     },
@@ -119,7 +128,7 @@ RUN_CONFIGS = [
         "quant_method": "k-quant",
         "quant_bits": 2,
         "quant_format": "Q2_K",
-        "model_id": "models/Gemma-2-9B-it-GGUF-Q2_K",
+        "model_id": os.path.join(GGUF_MODEL_DIR, "Gemma-2-9B-it-GGUF-Q2_K"),
         "gguf_format": "q2_k",
         "source_fp16": "google/gemma-2-9b-it",
     },
@@ -133,12 +142,21 @@ device = pick_device()
 
 def _ensure_local_quant(model_id, source_fp16, gguf_format, gguf_backend):
     """Quantize `source_fp16` to GGUF `model_id` via GPTQModel if the local
-    path doesn't exist yet. Mirrors _ensure_local_quant in benchmark_mlx.py."""
+    path doesn't exist yet or is incomplete. Mirrors _ensure_local_quant in benchmark_mlx.py."""
     if os.path.isdir(model_id):
-        return
+        # A complete multi-shard save has model.safetensors.index.json;
+        # a complete single-shard save has model.safetensors.
+        # Anything else is a partial write — wipe and re-quantize.
+        index_path = os.path.join(model_id, "model.safetensors.index.json")
+        single_shard = os.path.join(model_id, "model.safetensors")
+        if os.path.exists(index_path) or os.path.exists(single_shard):
+            return
+        import shutil
+        log.warning("incomplete quantized model at %s — removing and re-quantizing", model_id)
+        shutil.rmtree(model_id)
     log.info("quantizing %s to GGUF %s at %s...", source_fp16, gguf_format, model_id)
     bits = 2 if "q2" in gguf_format else 4
-    qconfig = GGUFConfig(bits=bits, format=gguf_format)
+    qconfig = GGUFConfig(bits=bits, format=gguf_format, offload_to_disk_path=GGUF_OFFLOAD_DIR)
     tokenizer = AutoTokenizer.from_pretrained(source_fp16)
     if not tokenizer.pad_token_id:
         tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -168,11 +186,10 @@ def benchmark_run(run_dir, config, gsm8k_questions, gguf_backend):
     log.info("RUN: %s", label)
     log.info("=" * 60)
 
-    if is_gguf and model_id.startswith(("models/", "/", ".")):
-        _ensure_local_quant(model_id, config["source_fp16"], config["gguf_format"], gguf_backend)
-
     model = None
     try:
+        if is_gguf and model_id.startswith(("models/", "/", ".")):
+            _ensure_local_quant(model_id, config["source_fp16"], config["gguf_format"], gguf_backend)
         log.info("loading model: %s", model_id)
         reset_peak_memory(device)
         t0 = time.perf_counter()
