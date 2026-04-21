@@ -69,7 +69,7 @@ MODELS = {
     "llama": {
         "name": "Llama-3.1-8B-Instruct",
         "short": "Llama-3.1-8B",
-        "fp16_id": "meta-llama/Llama-3.1-8B-Instruct",
+        "fp16_id": "mlx-community/Meta-Llama-3.1-8B-Instruct-bf16",
         "mlx_8bit_id": "mlx-community/Meta-Llama-3.1-8B-Instruct-8bit",
         "mlx_4bit_id": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
     },
@@ -83,7 +83,7 @@ MODELS = {
     "gemma": {
         "name": "Gemma-2-9B-IT",
         "short": "Gemma-2-9B",
-        "fp16_id": "google/gemma-2-9b-it",
+        "fp16_id": "mlx-community/gemma-2-9b-it-fp16",
         "mlx_8bit_id": "mlx-community/gemma-2-9b-it-8bit",
         "mlx_4bit_id": "mlx-community/gemma-2-9b-it-4bit",
     },
