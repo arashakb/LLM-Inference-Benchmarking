@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import logging
 import math
 import statistics
 import subprocess
@@ -42,6 +43,10 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx_lm import load as mlx_load
 from mlx_lm.models.cache import make_prompt_cache
+
+from bench_utils import setup_run_logging
+
+log = logging.getLogger("bench")
 
 # ── constants ──────────────────────────────────────────────────────────────────
 PROMPT_TOKENS = 512
@@ -219,22 +224,22 @@ def run_benchmark(
 ) -> BenchResult:
     n_prompt = input_ids.shape[1]
 
-    print(f"  [{label}] warming up ({warmup} run(s))…")
+    log.info(f"  [{label}] warming up ({warmup} run(s))…")
     for _ in range(warmup):
         _streaming_once(model, input_ids, DECODE_TOKENS)
     _reset_peak()
 
-    print(f"  [{label}] measuring prefill throughput…")
+    log.info(f"  [{label}] measuring prefill throughput…")
     prefill_times_ms: list[float] = []
     for i in range(trials):
         ms = _prefill_once(model, input_ids)
         prefill_times_ms.append(ms)
-        print(f"    run {i+1}/{trials}: {ms:.1f} ms  ({n_prompt/(ms/1e3):.0f} t/s)")
+        log.info(f"    run {i+1}/{trials}: {ms:.1f} ms  ({n_prompt/(ms/1e3):.0f} t/s)")
 
     prefill_mean_ms = statistics.mean(prefill_times_ms)
     prefill_toks_s = n_prompt / (prefill_mean_ms / 1e3)
 
-    print(f"  [{label}] measuring streaming latency ({trials} run(s))…")
+    log.info(f"  [{label}] measuring streaming latency ({trials} run(s))…")
     ttft_list: list[float] = []
     tpot_list: list[float] = []
     lat_list: list[float] = []
@@ -245,7 +250,7 @@ def run_benchmark(
         tpot_list.append(tpot)
         lat_list.append(total)
         decode_tps = 1e3 / tpot
-        print(
+        log.info(
             f"    run {i+1}/{trials}: "
             f"TTFT={ttft:.1f} ms  TPOT={tpot:.2f} ms  Total={total:.1f} ms  "
             f"Decode={decode_tps:.1f} t/s"
@@ -255,7 +260,7 @@ def run_benchmark(
     decode_toks_s = 1e3 / mean_tpot_ms
 
     peak = _peak_mem_gib()
-    print(
+    log.info(
         f"  [{label}] Weight Mem={weight_mem_gib:.2f} GiB  "
         f"Peak Mem={peak:.2f} GiB"
     )
@@ -291,7 +296,7 @@ def compute_ppl(
     scoring only the last half of each chunk."""
     from datasets import load_dataset
 
-    print("  [PPL] loading wikitext-2 test set…")
+    log.info("  [PPL] loading wikitext-2 test set…")
     test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     text = "\n\n".join(test["text"])
     all_tokens = _tokenize_ids(tokenizer, text, add_special_tokens=True)
@@ -302,7 +307,7 @@ def compute_ppl(
     first = n_ctx // 2
     tokens_per_chunk = n_ctx - first - 1
 
-    print(
+    log.info(
         f"  [PPL] {seq_len} tokens, n_ctx={n_ctx}, {n_chunk} chunks, "
         f"scoring last {tokens_per_chunk} tokens per chunk"
     )
@@ -343,7 +348,7 @@ def compute_ppl(
 
         if (i + 1) % 50 == 0 or i == n_chunk - 1:
             running_ppl = math.exp(nll_sum / count)
-            print(f"    chunk {i+1}/{n_chunk}: running PPL={running_ppl:.4f}")
+            log.info(f"    chunk {i+1}/{n_chunk}: running PPL={running_ppl:.4f}")
 
     nll_mean = nll_sum / count
     nll2_mean = nll2_sum / count
@@ -355,7 +360,7 @@ def compute_ppl(
     else:
         ppl_std = 0.0
 
-    print(f"  [PPL] Final estimate: PPL = {ppl:.4f} +/- {ppl_std:.5f}")
+    log.info(f"  [PPL] Final estimate: PPL = {ppl:.4f} +/- {ppl_std:.5f}")
     return ppl, ppl_std
 
 
@@ -393,7 +398,7 @@ def compute_hellaswag(
     from datasets import load_dataset
     import random as _random
 
-    print(f"  [HellaSwag] loading validation set (max {max_samples} samples)…")
+    log.info(f"  [HellaSwag] loading validation set (max {max_samples} samples)…")
     ds = load_dataset("Rowan/hellaswag", split="validation")
 
     indices = list(range(len(ds)))
@@ -451,10 +456,10 @@ def compute_hellaswag(
             correct += 1
 
         if (count_i + 1) % 100 == 0:
-            print(f"    {count_i+1}/{total}: acc={correct/(count_i+1)*100:.1f}%")
+            log.info(f"    {count_i+1}/{total}: acc={correct/(count_i+1)*100:.1f}%")
 
     acc = correct / total * 100
-    print(f"  [HellaSwag] accuracy = {acc:.2f}% ({correct}/{total})")
+    log.info(f"  [HellaSwag] accuracy = {acc:.2f}% ({correct}/{total})")
     return acc
 
 
@@ -463,10 +468,10 @@ def compute_winogrande(model, tokenizer) -> float:
     after the choice word, length-normalized."""
     from datasets import load_dataset
 
-    print("  [Winogrande] loading validation set…")
+    log.info("  [Winogrande] loading validation set…")
     ds = load_dataset("allenai/winogrande", "winogrande_debiased", split="validation")
     total = len(ds)
-    print(f"  [Winogrande] {total} samples")
+    log.info(f"  [Winogrande] {total} samples")
 
     K_MIN_TRAILING_CTX = 3
 
@@ -530,24 +535,133 @@ def compute_winogrande(model, tokenizer) -> float:
             correct += 1
 
         if (i + 1) % 200 == 0:
-            print(f"    {i+1}/{total}: acc={correct/(i+1)*100:.1f}%")
+            log.info(f"    {i+1}/{total}: acc={correct/(i+1)*100:.1f}%")
 
     acc = correct / total * 100
-    print(f"  [Winogrande] accuracy = {acc:.2f}% ({correct}/{total})")
+    log.info(f"  [Winogrande] accuracy = {acc:.2f}% ({correct}/{total})")
     return acc
 
 
 # ── output ────────────────────────────────────────────────────────────────────
 
-def print_speed_results(all_results: list[ModelResults]) -> None:
+def _write_tex(run_dir: str | None, filename: str, content: str) -> None:
+    if run_dir is None:
+        return
+    out_path = Path(run_dir) / filename
+    out_path.write_text(content)
+    log.info(f"  wrote {out_path}")
+
+
+def _build_speed_latex(all_results: list[ModelResults]) -> str:
+    lines: list[str] = []
+    lines.append(r"\begin{table*}[t]")
+    lines.append(r"  \centering")
+    lines.append(r"  \caption{%")
+    lines.append(r"    Inference speed and memory usage for three open-weight LLMs at multiple")
+    lines.append(r"    quantization levels, measured on Apple Silicon")
+    lines.append(r"    using mlx-lm.")
+    lines.append(r"    \textbf{Prefill} = prompt-processing throughput at 512 input tokens")
+    lines.append(r"    (PP512, tokens/s);")
+    lines.append(r"    \textbf{Decode} = text-generation throughput at 128 output tokens")
+    lines.append(r"    (TG128, tokens/s);")
+    lines.append(r"    \textbf{TTFT} = time-to-first-token;")
+    lines.append(r"    \textbf{TPOT} = time-per-output-token;")
+    lines.append(
+        r"    \textbf{Latency} = TTFT\,+\,TPOT (mean of " + str(LATENCY_RUNS)
+        + r" streaming runs,"
+    )
+    lines.append(r"    512-token prompt, 128 output tokens, temperature~0);")
+    lines.append(r"    \textbf{Weight} = model-weight memory footprint;")
+    lines.append(r"    \textbf{Peak} = maximum unified memory during benchmark.%")
+    lines.append(r"  }")
+    lines.append(r"  \label{tab:mlx_speed_memory}")
+    lines.append(r"  \resizebox{\linewidth}{!}{%")
+    lines.append(r"  \begin{tabular}{@{} l l rr rrr rr @{}}")
+    lines.append(r"    \toprule")
+    lines.append(r"    \multirow{2}{*}{\textbf{Model}} &")
+    lines.append(r"    \multirow{2}{*}{\textbf{Quant}} &")
+    lines.append(r"    \multicolumn{2}{c}{\textbf{Throughput (t/s)}} &")
+    lines.append(r"    \multicolumn{3}{c}{\textbf{Latency (ms)}} &")
+    lines.append(r"    \multicolumn{2}{c}{\textbf{Memory (GiB)}} \\")
+    lines.append(r"    \cmidrule(lr){3-4}\cmidrule(lr){5-7}\cmidrule(lr){8-9}")
+    lines.append(r"    & &")
+    lines.append(r"    \textbf{Prefill} & \textbf{Decode} &")
+    lines.append(r"    \textbf{TTFT}   & \textbf{TPOT}  & \textbf{Total} &")
+    lines.append(r"    \textbf{Weight} & \textbf{Peak}  \\")
+
     for mr in all_results:
-        print()
-        print("=" * 130)
-        print(
+        lines.append(r"    \midrule")
+        for i, r in enumerate(mr.speed):
+            quant = r.quant.replace("_", r"\_")
+            name_col = mr.model_name if i == 0 else " " * len(mr.model_name)
+            lines.append(
+                f"    {name_col} & {quant} & "
+                f"{r.prefill_toks_s:.0f} & {r.decode_toks_s:.1f} & "
+                f"${r.ttft_mean:.1f}\\pm{r.ttft_std:.1f}$ & "
+                f"${r.tpot_mean:.2f}\\pm{r.tpot_std:.2f}$ & "
+                f"${r.lat_mean:.1f}\\pm{r.lat_std:.1f}$ & "
+                f"{r.weight_mem_gib:.2f} & {r.peak_mem_gib:.2f} \\\\"
+            )
+
+    lines.append(r"    \bottomrule")
+    lines.append(r"  \end{tabular}%")
+    lines.append(r"  }")
+    lines.append(r"\end{table*}")
+    return "\n".join(lines) + "\n"
+
+
+def _build_quality_latex(all_results: list[ModelResults]) -> str:
+    lines: list[str] = []
+    lines.append(r"\begin{table}[t]")
+    lines.append(r"  \centering")
+    lines.append(r"  \caption{%")
+    lines.append(r"    Model quality metrics at multiple MLX quantization levels.")
+    lines.append(r"    \textbf{PPL} = perplexity on the Wikitext-2 test set")
+    lines.append(r"    (lower is better).")
+    lines.append(
+        r"    \textbf{HellaSwag} = accuracy on " + str(HELLASWAG_SAMPLES)
+        + r" commonsense-NLI tasks from the"
+    )
+    lines.append(r"    HellaSwag validation set (higher is better).")
+    lines.append(r"    \textbf{Winogrande} = accuracy on 1{,}267 debiased pronoun-resolution")
+    lines.append(r"    tasks (higher is better).")
+    lines.append(r"    Both accuracy benchmarks are evaluated via log-likelihood ranking.%")
+    lines.append(r"  }")
+    lines.append(r"  \label{tab:mlx_quality}")
+    lines.append(r"  \begin{tabular}{@{} l l r rr @{}}")
+    lines.append(r"    \toprule")
+    lines.append(r"    \textbf{Model} & \textbf{Quant} &")
+    lines.append(r"    \textbf{PPL\,$\downarrow$} &")
+    lines.append(r"    \textbf{HellaSwag (\%)\,$\uparrow$} &")
+    lines.append(r"    \textbf{Winogrande (\%)\,$\uparrow$} \\")
+
+    for mr in all_results:
+        lines.append(r"    \midrule")
+        for i, q in enumerate(mr.quality):
+            quant = q.quant.replace("_", r"\_")
+            name_col = mr.model_short if i == 0 else " " * len(mr.model_short)
+            lines.append(
+                f"    {name_col} & {quant} & "
+                f"${q.ppl:.2f}\\pm{q.ppl_std:.2f}$ & {q.hellaswag:.2f} & {q.winogrande:.2f} \\\\"
+            )
+
+    lines.append(r"    \bottomrule")
+    lines.append(r"  \end{tabular}")
+    lines.append(r"\end{table}")
+    return "\n".join(lines) + "\n"
+
+
+def print_speed_results(
+    all_results: list[ModelResults], run_dir: str | None = None
+) -> None:
+    for mr in all_results:
+        log.info("")
+        log.info("=" * 130)
+        log.info(
             f"  {mr.model_name}  |  Prompt={PROMPT_TOKENS} tokens  |  "
             f"Decode={DECODE_TOKENS} tokens  |  Latency runs={LATENCY_RUNS}"
         )
-        print("=" * 130)
+        log.info("=" * 130)
         hdr = (
             f"  {'Quant':<10}  {'Prefill':>9}  {'Decode':>9}  "
             f"{'TTFT (ms)':>22}  {'TPOT (ms)':>22}  "
@@ -558,129 +672,54 @@ def print_speed_results(all_results: list[ModelResults]) -> None:
             f"{'mean ± std':>22}  {'mean ± std':>22}  "
             f"{'mean ± std':>25}  {'(GiB)':>9}  {'(GiB)':>9}"
         )
-        print(hdr)
-        print(sub)
-        print("-" * 130)
+        log.info(hdr)
+        log.info(sub)
+        log.info("-" * 130)
         for r in mr.speed:
-            print(
+            log.info(
                 f"  {r.quant:<10}  {r.prefill_toks_s:>9.0f}  {r.decode_toks_s:>9.1f}  "
                 f"  {r.ttft_mean:>8.1f} ± {r.ttft_std:>6.1f}  "
                 f"  {r.tpot_mean:>8.2f} ± {r.tpot_std:>6.2f}  "
                 f"  {r.lat_mean:>10.1f} ± {r.lat_std:>8.1f}  "
                 f"  {r.weight_mem_gib:>9.2f}  {r.peak_mem_gib:>9.2f}"
             )
-        print("=" * 130)
+        log.info("=" * 130)
 
     # ── LaTeX speed table ────────────────────────────────────────────────
+    latex = _build_speed_latex(all_results)
     print()
-    print(r"""\begin{table*}[t]
-  \centering
-  \caption{%
-    Inference speed and memory usage for three open-weight LLMs at multiple
-    quantization levels, measured on Apple Silicon
-    using mlx-lm.
-    \textbf{Prefill} = prompt-processing throughput at 512 input tokens
-    (PP512, tokens/s);
-    \textbf{Decode} = text-generation throughput at 128 output tokens
-    (TG128, tokens/s);
-    \textbf{TTFT} = time-to-first-token;
-    \textbf{TPOT} = time-per-output-token;
-    \textbf{Latency} = TTFT\,+\,TPOT (mean of """ + str(LATENCY_RUNS) + r""" streaming runs,
-    512-token prompt, 128 output tokens, temperature~0);
-    \textbf{Weight} = model-weight memory footprint;
-    \textbf{Peak} = maximum unified memory during benchmark.%
-  }
-  \label{tab:mlx_speed_memory}
-  \resizebox{\linewidth}{!}{%
-  \begin{tabular}{@{} l l rr rrr rr @{}}
-    \toprule
-    \multirow{2}{*}{\textbf{Model}} &
-    \multirow{2}{*}{\textbf{Quant}} &
-    \multicolumn{2}{c}{\textbf{Throughput (t/s)}} &
-    \multicolumn{3}{c}{\textbf{Latency (ms)}} &
-    \multicolumn{2}{c}{\textbf{Memory (GiB)}} \\
-    \cmidrule(lr){3-4}\cmidrule(lr){5-7}\cmidrule(lr){8-9}
-    & &
-    \textbf{Prefill} & \textbf{Decode} &
-    \textbf{TTFT}   & \textbf{TPOT}  & \textbf{Total} &
-    \textbf{Weight} & \textbf{Peak}  \\""")
-
-    for mi, mr in enumerate(all_results):
-        print(r"    \midrule")
-        for i, r in enumerate(mr.speed):
-            quant = r.quant.replace("_", r"\_")
-            name_col = mr.model_name if i == 0 else " " * len(mr.model_name)
-            print(
-                f"    {name_col} & {quant} & "
-                f"{r.prefill_toks_s:.0f} & {r.decode_toks_s:.1f} & "
-                f"${r.ttft_mean:.1f}\\pm{r.ttft_std:.1f}$ & "
-                f"${r.tpot_mean:.2f}\\pm{r.tpot_std:.2f}$ & "
-                f"${r.lat_mean:.1f}\\pm{r.lat_std:.1f}$ & "
-                f"{r.weight_mem_gib:.2f} & {r.peak_mem_gib:.2f} \\\\"
-            )
-
-    print(r"""    \bottomrule
-  \end{tabular}%
-  }
-\end{table*}""")
+    print(latex, end="")
+    _write_tex(run_dir, "speed_table.tex", latex)
 
 
-def print_quality_results(all_results: list[ModelResults]) -> None:
+def print_quality_results(
+    all_results: list[ModelResults], run_dir: str | None = None
+) -> None:
     has_quality = any(mr.quality for mr in all_results)
     if not has_quality:
         return
 
     # ── ASCII table ──────────────────────────────────────────────────────
-    print()
-    print("=" * 80)
-    print("  Quality Metrics")
-    print("=" * 80)
-    print(f"  {'Model':<25}  {'Quant':<10}  {'PPL':>18}  {'HellaSwag':>12}  {'Winogrande':>12}")
-    print("-" * 90)
+    log.info("")
+    log.info("=" * 80)
+    log.info("  Quality Metrics")
+    log.info("=" * 80)
+    log.info(f"  {'Model':<25}  {'Quant':<10}  {'PPL':>18}  {'HellaSwag':>12}  {'Winogrande':>12}")
+    log.info("-" * 90)
     for mr in all_results:
         for q in mr.quality:
             ppl_str = f"{q.ppl:.4f} ± {q.ppl_std:.5f}"
-            print(
+            log.info(
                 f"  {mr.model_short:<25}  {q.quant:<10}  {ppl_str:>18}  "
                 f"{q.hellaswag:>11.2f}%  {q.winogrande:>11.2f}%"
             )
-    print("=" * 90)
+    log.info("=" * 90)
 
     # ── LaTeX quality table ──────────────────────────────────────────────
+    latex = _build_quality_latex(all_results)
     print()
-    print(r"""\begin{table}[t]
-  \centering
-  \caption{%
-    Model quality metrics at multiple MLX quantization levels.
-    \textbf{PPL} = perplexity on the Wikitext-2 test set
-    (lower is better).
-    \textbf{HellaSwag} = accuracy on """ + str(HELLASWAG_SAMPLES) + r""" commonsense-NLI tasks from the
-    HellaSwag validation set (higher is better).
-    \textbf{Winogrande} = accuracy on 1{,}267 debiased pronoun-resolution
-    tasks (higher is better).
-    Both accuracy benchmarks are evaluated via log-likelihood ranking.%
-  }
-  \label{tab:mlx_quality}
-  \begin{tabular}{@{} l l r rr @{}}
-    \toprule
-    \textbf{Model} & \textbf{Quant} &
-    \textbf{PPL\,$\downarrow$} &
-    \textbf{HellaSwag (\%)\,$\uparrow$} &
-    \textbf{Winogrande (\%)\,$\uparrow$} \\""")
-
-    for mi, mr in enumerate(all_results):
-        print(r"    \midrule")
-        for i, q in enumerate(mr.quality):
-            quant = q.quant.replace("_", r"\_")
-            name_col = mr.model_short if i == 0 else " " * len(mr.model_short)
-            print(
-                f"    {name_col} & {quant} & "
-                f"${q.ppl:.2f}\\pm{q.ppl_std:.2f}$ & {q.hellaswag:.2f} & {q.winogrande:.2f} \\\\"
-            )
-
-    print(r"""    \bottomrule
-  \end{tabular}
-\end{table}""")
+    print(latex, end="")
+    _write_tex(run_dir, "quality_table.tex", latex)
 
 
 # ── quantization helpers ──────────────────────────────────────────────────────
@@ -690,7 +729,7 @@ def _ensure_local_quant(source_fp16: str, out_dir: Path, bits: int) -> None:
     if out_dir.exists() and any(out_dir.iterdir()):
         return
     out_dir.parent.mkdir(parents=True, exist_ok=True)
-    print(f"  self-quantizing {source_fp16} to {bits}-bit at {out_dir}…")
+    log.info(f"  self-quantizing {source_fp16} to {bits}-bit at {out_dir}…")
     subprocess.run([
         sys.executable, "-m", "mlx_lm", "convert",
         "--hf-path", source_fp16,
@@ -712,16 +751,16 @@ def _resolve_and_load(
     fp16_fallback into local_quant_dir. Returns (model, tokenizer)."""
     if mlx_community_id is not None:
         try:
-            print(f"  Loading {variant_label}: {mlx_community_id}")
+            log.info(f"  Loading {variant_label}: {mlx_community_id}")
             return mlx_load(mlx_community_id)
         except Exception as e:
-            print(f"  warning: mlx-community load failed ({e}); falling back to self-quantize")
+            log.warning(f"  mlx-community load failed ({e}); falling back to self-quantize")
 
     if fp16_fallback is None or local_quant_dir is None or bits is None:
         raise RuntimeError(f"no fallback available for {variant_label}")
 
     _ensure_local_quant(fp16_fallback, local_quant_dir, bits)
-    print(f"  Loading {variant_label}: {local_quant_dir}")
+    log.info(f"  Loading {variant_label}: {local_quant_dir}")
     return mlx_load(str(local_quant_dir))
 
 
@@ -735,9 +774,9 @@ def benchmark_model(
     model_name = model_cfg["name"]
     model_short = model_cfg["short"]
 
-    print(f"\n{'='*80}")
-    print(f"  MODEL: {model_name}")
-    print(f"{'='*80}")
+    log.info(f"\n{'='*80}")
+    log.info(f"  MODEL: {model_name}")
+    log.info(f"{'='*80}")
 
     fp16_id = model_cfg["fp16_id"]
     q8_dir = work_dir / "mlx_8bit"
@@ -784,7 +823,7 @@ def benchmark_model(
         if v["is_fp16"] and args.skip_f16:
             continue
 
-        print(f"\n── {label} {'─'*60}")
+        log.info(f"\n── {label} {'─'*60}")
 
         _reset_peak()
         model, tokenizer = _resolve_and_load(
@@ -796,11 +835,11 @@ def benchmark_model(
         )
         mx.eval(model.parameters())
         weight_mem = _weight_mem_gib()
-        print(f"  Weight memory after load: {weight_mem:.2f} GiB")
+        log.info(f"  Weight memory after load: {weight_mem:.2f} GiB")
 
         if prompt is None:
             prompt, n_prompt = build_prompt(tokenizer, PROMPT_TOKENS)
-            print(f"  Prompt: {n_prompt} tokens  (target: {PROMPT_TOKENS})")
+            log.info(f"  Prompt: {n_prompt} tokens  (target: {PROMPT_TOKENS})")
 
         _reset_peak()
 
@@ -816,7 +855,7 @@ def benchmark_model(
 
         # Quality evaluation
         if args.eval:
-            print(f"\n  ── Quality evaluation for {label} ──")
+            log.info(f"\n  ── Quality evaluation for {label} ──")
             ppl, ppl_std = compute_ppl(model, tokenizer)
             hellaswag_acc = compute_hellaswag(model, tokenizer)
             winogrande_acc = compute_winogrande(model, tokenizer)
@@ -869,18 +908,19 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    run_dir = setup_run_logging(__file__)
 
     try:
         from importlib.metadata import version as _pkg_version
         mlx_lm_version = _pkg_version("mlx-lm")
     except Exception:
         mlx_lm_version = "unknown"
-    print(f"MLX default device: {mx.default_device()}  |  mlx-lm version: {mlx_lm_version}")
+    log.info(f"MLX default device: {mx.default_device()}  |  mlx-lm version: {mlx_lm_version}")
 
     model_keys = [k.strip() for k in args.models.split(",")]
     for k in model_keys:
         if k not in MODELS:
-            print(f"ERROR: Unknown model key '{k}'. Available: {', '.join(MODELS)}")
+            log.error(f"Unknown model key '{k}'. Available: {', '.join(MODELS)}")
             sys.exit(1)
 
     all_results: list[ModelResults] = []
@@ -892,9 +932,9 @@ def main() -> None:
         all_results.append(mr)
 
     if not args.skip_speed:
-        print_speed_results(all_results)
+        print_speed_results(all_results, run_dir=run_dir)
     if args.eval:
-        print_quality_results(all_results)
+        print_quality_results(all_results, run_dir=run_dir)
 
 
 if __name__ == "__main__":
