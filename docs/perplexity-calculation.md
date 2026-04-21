@@ -87,3 +87,71 @@ The weighted average ensures short final windows don't skew the result.
 ## Why overlap matters
 
 Without overlap, each window would start "cold" -- the model has no context for the first tokens and makes poor predictions, artificially inflating perplexity. The overlap gives the model `max_length - stride = 1536` tokens of context before scoring new tokens, closely matching how the model would process continuous text in practice.
+
+## The llama.cpp-style variant (`bench_llama31_gguf.py`)
+
+`bench_llama31_gguf.py:compute_ppl()` uses a different scheme that mirrors `llama.cpp`'s `perplexity` tool exactly. Instead of overlapping a sliding window, it **partitions the corpus into non-overlapping chunks** and discards the first half of each chunk as context.
+
+### Configuration
+
+```
+PPL_N_CTX      = 512          # tokens per chunk
+PPL_MAX_CHUNKS = 400          # cap on number of chunks
+first          = n_ctx // 2   # = 256, warmup half
+tokens_per_chunk = n_ctx - first - 1  # = 255 scored tokens/chunk
+```
+
+### Chunking
+
+```
+Corpus tokens: [t0, t1, ..., t_{N-1}]
+
+Chunk 0: [t0   .. t_{511}]     context = t0..t255,   scored = t257..t511
+Chunk 1: [t512 .. t_{1023}]    context = t512..t767, scored = t769..t1023
+Chunk 2: [t1024 .. t_{1535}]   ...
+```
+
+Chunks never overlap. `n_chunk = min(400, seq_len // 512)`.
+
+### Per-chunk scoring
+
+For each chunk:
+
+1. **Force BOS** at position 0: `chunk_tokens[0] = bos_token_id` (if tokenizer has one). This matches llama.cpp, which always prepends BOS so the first real token has a sensible context distribution.
+2. Forward the full 512-token chunk through the model to get `logits` of shape `(512, vocab)`.
+3. **Score only the second half**:
+   ```python
+   target_tokens = all_tokens[start + first + 1 : start + n_ctx]  # length 255
+   score_logits  = logits[first : n_ctx - 1]                      # length 255
+   ```
+   Logit at position `i` predicts the token at position `i+1`, so `logits[256:511]` predict `targets[257:512]`. The first 256 tokens of the chunk serve as warmup/context and are not scored.
+4. Compute per-token NLL:
+   ```python
+   log_probs  = torch.log_softmax(score_logits, dim=-1)
+   token_nlls = -log_probs.gather(1, target_tokens.unsqueeze(1)).squeeze(1)
+   ```
+5. Accumulate `nll_sum += Σ nll` and `nll2_sum += Σ nll²` across all scored tokens.
+
+### Final aggregation
+
+```python
+nll_mean  = nll_sum / count
+ppl       = math.exp(nll_mean)
+
+variance  = nll2_mean - nll_mean**2            # per-token NLL variance
+ppl_std   = math.sqrt(variance / (count - 1)) * ppl
+```
+
+The std error uses the **delta method**: if `σ_nll` is the std error of the mean NLL, then `σ_ppl ≈ exp(mean_nll) · σ_nll = ppl · σ_nll`. This is how llama.cpp reports `PPL ± err`.
+
+### Comparison to the sliding-window variant
+
+| Aspect | `bench_utils.py` (sliding) | `bench_llama31_gguf.py` (llama.cpp-style) |
+|---|---|---|
+| Windows | Overlapping, stride-based | Non-overlapping, contiguous |
+| Context per scored token | `max_length - stride` (e.g. 1536) | `n_ctx // 2` (256) |
+| First chunk | All tokens scored | Only second half scored |
+| BOS injection | No | Yes, forced at chunk start |
+| Matches | HuggingFace PPL convention | llama.cpp `perplexity` tool |
+
+The llama.cpp variant is the right choice when comparing PPL numbers against llama.cpp's published results; the sliding-window variant gives a lower (more favorable) PPL because every scored token has more context.
