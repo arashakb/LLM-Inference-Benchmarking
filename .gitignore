@@ -2,6 +2,7 @@
 *.safetensors
 *.bin
 *.gguf
+models/
 Qwen2.5-7B-Instruct-GGUF-Q4_K_M/
 Llama-3.2-1B-Instruct-GGUF-Q4_K_M/
 gptqmodel_offload/
@@ -12,7 +13,14 @@ GPTQModel/
 # Logs
 *.log
 
+# Benchmark run artifacts
+outputs/
+analysis/comparisons/data/
+
 # Python
 __pycache__/
 *.pyc
 *.pyo
+
+# Claude Code
+.claude/
